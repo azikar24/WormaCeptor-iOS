@@ -71,32 +71,26 @@ public enum WormaCeptorInspector {
     }
 
     private static let shakeHook: Void = {
-        let original = #selector(UIResponder.motionEnded(_:with:))
-        let replacement = #selector(UIWindow.wormaCeptorMotionEnded(_:with:))
-        guard
-            let originalMethod = class_getInstanceMethod(UIWindow.self, original),
-            let replacementMethod = class_getInstanceMethod(UIWindow.self, replacement)
-        else {
+        let selector = #selector(UIResponder.motionEnded(_:with:))
+        guard let method = class_getInstanceMethod(UIWindow.self, selector) else {
             print("WormaCeptor: could not hook UIWindow.motionEnded; shake to open is off")
             return
         }
-        // UIWindow inherits motionEnded from UIResponder: add an override to UIWindow instead of swapping
+        typealias MotionEnded = @convention(c) (UIWindow, Selector, UIEvent.EventSubtype, UIEvent?) -> Void
+        let original = unsafeBitCast(method_getImplementation(method), to: MotionEnded.self)
+        // Called with the real selector: UIResponder's version forwards the event to the next responder under the
+        // selector it ran with, and nothing up the chain answers a renamed one.
+        let hook: @convention(block) (UIWindow, UIEvent.EventSubtype, UIEvent?) -> Void = { window, motion, event in
+            original(window, selector, motion, event)
+            if motion == .motionShake {
+                MainActor.assumeIsolated { present() }
+            }
+        }
+        let implementation = imp_implementationWithBlock(hook)
+        // UIWindow inherits motionEnded from UIResponder: add an override to UIWindow instead of replacing
         // UIResponder's own implementation, which every view and controller shares.
-        let added = class_addMethod(
-            UIWindow.self,
-            original,
-            method_getImplementation(replacementMethod),
-            method_getTypeEncoding(replacementMethod)
-        )
-        if added {
-            class_replaceMethod(
-                UIWindow.self,
-                replacement,
-                method_getImplementation(originalMethod),
-                method_getTypeEncoding(originalMethod)
-            )
-        } else {
-            method_exchangeImplementations(originalMethod, replacementMethod)
+        if !class_addMethod(UIWindow.self, selector, implementation, method_getTypeEncoding(method)) {
+            method_setImplementation(method, implementation)
         }
     }()
 
@@ -122,16 +116,6 @@ private final class InspectorHostingController: UIHostingController<WormaCeptorI
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
-    }
-}
-
-extension UIWindow {
-    // After the hook this selector runs the inherited motionEnded, so the call below is not recursive.
-    @objc fileprivate func wormaCeptorMotionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        wormaCeptorMotionEnded(motion, with: event)
-        if motion == .motionShake {
-            WormaCeptorInspector.present()
-        }
     }
 }
 

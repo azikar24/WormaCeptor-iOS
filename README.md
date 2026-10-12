@@ -12,7 +12,7 @@ Xcode > File > Add Package Dependencies, then enter:
 https://github.com/azikar24/WormaCeptor-iOS
 ```
 
-Pick version `0.1.0` and add the products you need:
+Pick version `0.1.1` and add the products you need:
 
 - `WormaCeptorURLSession`: capture, mocking, throttling, MCP server
 - `WormaCeptorUI`: the in-app inspector (optional)

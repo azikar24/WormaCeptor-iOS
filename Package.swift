@@ -12,7 +12,7 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "WormaCeptor",
-            url: "https://github.com/azikar24/WormaCeptor-iOS/releases/download/0.1.0/WormaCeptor.xcframework.zip",
+            url: "https://github.com/azikar24/WormaCeptor-iOS/releases/download/0.1.1/WormaCeptor.xcframework.zip",
             checksum: "0559dbf85eb111fb4c085c9ea3abf8ab6c18759e7c44a74ec88c66a35a847121"
         ),
         .target(name: "WormaCeptorURLSession", dependencies: ["WormaCeptor"]),
