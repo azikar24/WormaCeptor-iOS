@@ -30,13 +30,7 @@ public struct WormaCeptorInspectorView: View {
                 CrashListScreen().toolbar { doneButton }
             }
             .navigationViewStyle(.stack)
-            .tabItem { Label("Crashes", systemImage: "exclamationmark.octagon") }
-
-            NavigationView {
-                MockRulesScreen().toolbar { doneButton }
-            }
-            .navigationViewStyle(.stack)
-            .tabItem { Label("Mock rules", systemImage: "theatermasks") }
+            .tabItem { Label("Crashes", systemImage: "ladybug") }
 
             NavigationView {
                 ToolsScreen().toolbar { doneButton }
@@ -44,6 +38,8 @@ public struct WormaCeptorInspectorView: View {
             .navigationViewStyle(.stack)
             .tabItem { Label("Tools", systemImage: "wrench.and.screwdriver") }
         }
+        // Android's three tabs and brand teal; mock rules live under Tools > Network, as on Android.
+        .tint(InspectorTheme.brand)
     }
 
     private var doneButton: some ToolbarContent {

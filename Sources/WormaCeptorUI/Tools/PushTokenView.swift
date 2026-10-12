@@ -11,8 +11,19 @@ struct PushTokenScreen: View {
         PushTokenContent(history: history, permission: permission)
             .navigationTitle("Push token")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await refresh() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
+                    }
+                    .tint(InspectorTheme.brand)
+                    .accessibilityLabel("Refresh")
+                }
+            }
             .task { await refresh() }
-            .refreshable { await refresh() }
     }
 
     private func refresh() async {
@@ -68,71 +79,166 @@ struct NotificationPermission {
     }
 }
 
+/// Android's push token screen: the current token card, then the token history. iOS adds the notification
+/// permission card.
 struct PushTokenContent: View {
     let history: [WormaCeptorPushTokenEntry]
     let permission: NotificationPermission?
 
     var body: some View {
-        List {
-            tokenSection
-            if let permission {
-                Section("Notifications") {
-                    InfoRowView(row: WormaCeptorInfoRow(label: "Permission", value: permission.status))
-                    // iOS reports every setting "not supported" until the user has answered the prompt.
-                    if permission.isAnswered {
-                        InfoRowView(row: WormaCeptorInfoRow(label: "Alerts", value: permission.alerts))
-                        InfoRowView(row: WormaCeptorInfoRow(label: "Badges", value: permission.badges))
-                        InfoRowView(row: WormaCeptorInfoRow(label: "Sounds", value: permission.sounds))
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.lg) {
+                PushTokenCurrentCard(entry: history.first)
+                if let permission {
+                    permissionCard(permission)
                 }
+                historySection
             }
-            if history.count > 1 {
-                Section("Earlier tokens") {
-                    ForEach(history.dropFirst(), id: \.token) { entry in
-                        TokenView(entry: entry)
-                    }
-                }
-            }
+            .padding(InspectorTheme.Spacing.lg)
         }
-        .listStyle(.insetGrouped)
+        .inspectorScreen()
     }
 
-    @ViewBuilder
-    private var tokenSection: some View {
-        if let current = history.first {
-            Section {
-                TokenView(entry: current)
-            } header: {
-                HStack {
-                    Text("APNs token")
-                    Spacer()
-                    CopyButton(text: current.token, label: "Token")
-                }
+    private func permissionCard(_ permission: NotificationPermission) -> some View {
+        InspectorSectionCard("Notifications", systemImage: "bell") {
+            InspectorKeyValueRow(label: "Permission", value: permission.status)
+            // iOS reports every setting "not supported" until the user has answered the prompt.
+            if permission.isAnswered {
+                InspectorKeyValueRow(label: "Alerts", value: permission.alerts)
+                InspectorKeyValueRow(label: "Badges", value: permission.badges)
+                InspectorKeyValueRow(label: "Sounds", value: permission.sounds)
             }
-        } else {
-            Section("APNs token") {
-                Text("No token reported. Call WormaCeptorPushToken.shared.set(deviceToken:) from application(_:didRegisterForRemoteNotificationsWithDeviceToken:).")
-                    .font(.callout)
+        }
+    }
+
+    private var historySection: some View {
+        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.sm) {
+            Text("Token history")
+                .font(InspectorFont.titleMedium)
+                .foregroundColor(InspectorTheme.textPrimary)
+                .frame(minHeight: InspectorTheme.minTouchTarget)
+                .accessibilityAddTraits(.isHeader)
+            if history.isEmpty {
+                Text("No history")
+                    .font(InspectorFont.body)
                     .foregroundColor(InspectorTheme.secondaryText)
+                    .frame(maxWidth: .infinity, minHeight: 96)
+            }
+            ForEach(Array(history.enumerated()), id: \.element.token) { index, entry in
+                PushTokenHistoryRow(entry: entry, isFirst: index == history.count - 1)
             }
         }
     }
 }
 
-private struct TokenView: View {
-    let entry: WormaCeptorPushTokenEntry
+/// Android's `PushTokenCurrentTokenCard`: the token in a mono box, its provider and time, and a copy button.
+private struct PushTokenCurrentCard: View {
+    let entry: WormaCeptorPushTokenEntry?
+
+    @State private var copied = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-            Text(entry.token)
-                .font(.system(.footnote, design: .monospaced))
-                .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.md) {
+            Text("Current token")
+                .font(InspectorFont.titleMedium)
+                .foregroundColor(InspectorTheme.textPrimary)
+                .accessibilityAddTraits(.isHeader)
+            if let entry {
+                tokenSection(entry)
+            } else {
+                VStack(spacing: InspectorTheme.Spacing.sm) {
+                    Image(systemName: "bell.slash")
+                        .font(.system(size: InspectorTheme.IconSize.xl))
+                        .foregroundColor(InspectorTheme.secondaryText)
+                        .accessibilityHidden(true)
+                    Text("No token reported")
+                        .font(InspectorFont.bodyMedium)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                    Text("Call WormaCeptorPushToken.shared.set(deviceToken:) from application(_:didRegisterForRemoteNotificationsWithDeviceToken:).")
+                        .font(InspectorFont.bodySmall)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, InspectorTheme.Spacing.sm)
+            }
+        }
+        .inspectorCard(
+            fill: InspectorTheme.surface,
+            border: InspectorTheme.outlineVariant.opacity(InspectorTheme.Alpha.medium),
+            padding: InspectorTheme.Spacing.lg
+        )
+    }
+    @ViewBuilder private func tokenSection(_ entry: WormaCeptorPushTokenEntry) -> some View {
+        Text(entry.token)
+            .font(InspectorFont.code)
+            .foregroundColor(InspectorTheme.textPrimary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(InspectorTheme.Spacing.md)
+            .background(RoundedRectangle(cornerRadius: InspectorTheme.Radius.md).fill(InspectorTheme.background))
+        HStack(spacing: InspectorTheme.Spacing.sm) {
+            InspectorBadge(text: "APNS", color: InspectorTheme.color(for: .success))
             Text("Received \(InspectorFormat.time(entry.receivedMs))")
-                .font(.caption)
+                .font(InspectorFont.labelSmall)
                 .foregroundColor(InspectorTheme.secondaryText)
         }
-        .frame(minHeight: InspectorTheme.minTouchTarget)
         .accessibilityElement(children: .combine)
+        Button {
+            UIPasteboard.general.string = entry.token
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+        } label: {
+            Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(InspectorFilledButtonStyle())
+        .accessibilityLabel(copied ? "Token copied" : "Copy token")
+    }
+}
+
+/// Android's `PushTokenHistoryItem`: event icon well, event name, token prefix and time. iOS knows no events, so the
+/// oldest token reads as created and later ones as refreshed.
+private struct PushTokenHistoryRow: View {
+    static let previewLength = 20
+
+    let entry: WormaCeptorPushTokenEntry
+    let isFirst: Bool
+
+    var body: some View {
+        let color = InspectorTheme.color(for: isFirst ? .success : .redirect)
+        HStack(spacing: InspectorTheme.Spacing.md) {
+            InspectorIconWell(
+                systemImage: isFirst ? "plus" : "arrow.triangle.2.circlepath",
+                color: color,
+                size: InspectorTheme.IconSize.xl,
+                iconSize: InspectorTheme.IconSize.sm - 2
+            )
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
+                Text(isFirst ? "Created" : "Refreshed")
+                    .font(InspectorFont.bodyMedium)
+                    .foregroundColor(InspectorTheme.textPrimary)
+                Text(entry.token.prefix(Self.previewLength) + "...")
+                    .font(InspectorFont.code)
+                    .foregroundColor(InspectorTheme.secondaryText)
+            }
+            Spacer(minLength: InspectorTheme.Spacing.sm)
+            Text(InspectorFormat.time(entry.receivedMs))
+                .font(InspectorFont.labelSmall)
+                .foregroundColor(InspectorTheme.secondaryText)
+        }
+        .inspectorCard(
+            fill: InspectorTheme.surface,
+            border: InspectorTheme.outlineVariant.opacity(InspectorTheme.Alpha.medium)
+        )
+        .accessibilityElement(children: .combine)
+        .contextMenu {
+            Button {
+                UIPasteboard.general.string = entry.token
+            } label: {
+                Label("Copy token", systemImage: "doc.on.doc")
+            }
+        }
     }
 }
 
@@ -142,6 +248,14 @@ private struct TokenView: View {
         PushTokenContent(history: PreviewSamples.pushTokens, permission: PreviewSamples.permission)
             .navigationTitle("Push token")
     }
+}
+
+#Preview("Push token dark") {
+    NavigationView {
+        PushTokenContent(history: PreviewSamples.pushTokens, permission: PreviewSamples.permission)
+            .navigationTitle("Push token")
+    }
+    .preferredColorScheme(.dark)
 }
 
 #Preview("No push token") {

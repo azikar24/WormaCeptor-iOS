@@ -155,33 +155,47 @@ private final class OverlayRootController: UIViewController {
     }
 }
 
-/// The panel: one line per metric, colored by health. Dark in both appearances so it reads over any screen.
+/// Android's overlay pill: a dot in the metric's health color, a grey label and a white value per metric, on #1C1C1E in
+/// both appearances so it reads over any screen. The view itself is at least 44 pt tall to keep the touch target; the
+/// pill is centered in it.
 final class OverlayPanel: UIView {
     var onTap: () -> Void = {}
 
-    private let cpu = OverlayPanel.label()
-    private let memory = OverlayPanel.label()
-    private let fps = OverlayPanel.label()
+    private let pill = UIView()
+    private let cpu = OverlayMetricView(label: "CPU")
+    private let memory = OverlayMetricView(label: "MEM")
+    private let fps = OverlayMetricView(label: "FPS")
     private var placed = false
 
     private static let margin: CGFloat = 8
 
     init() {
         super.init(frame: .zero)
-        backgroundColor = UIColor(white: 0.08, alpha: 0.9)
-        layer.cornerRadius = 8
-        layer.borderWidth = 1
-        layer.borderColor = UIColor(white: 1, alpha: 0.16).cgColor
+        backgroundColor = .clear
+        pill.backgroundColor = OverlayColors.background
+        pill.isUserInteractionEnabled = false
+        pill.layer.shadowColor = UIColor.black.cgColor
+        pill.layer.shadowOpacity = 0.2
+        pill.layer.shadowRadius = 4
+        pill.layer.shadowOffset = CGSize(width: 0, height: 2)
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(pill)
         let stack = UIStackView(arrangedSubviews: [cpu, memory, fps])
-        stack.axis = .vertical
-        stack.spacing = 2
+        stack.axis = .horizontal
+        stack.spacing = InspectorTheme.Spacing.md
+        stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        pill.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            pill.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pill.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pill.centerYAnchor.constraint(equalTo: centerYAnchor),
+            pill.topAnchor.constraint(greaterThanOrEqualTo: topAnchor),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: InspectorTheme.minTouchTarget),
+            stack.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: InspectorTheme.Spacing.md),
+            stack.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -InspectorTheme.Spacing.md),
+            stack.topAnchor.constraint(equalTo: pill.topAnchor, constant: InspectorTheme.Spacing.sm),
+            stack.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -InspectorTheme.Spacing.sm),
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
@@ -196,11 +210,16 @@ final class OverlayPanel: UIView {
         nil
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        pill.layer.cornerRadius = pill.bounds.height / 2
+    }
+
     func update(_ state: WormaCeptorPerformanceState) {
         render(cpu: text(state.cpu), memory: text(state.memory), fps: text(state.fps))
-        cpu.textColor = Self.color(for: state.cpu.tone)
-        memory.textColor = Self.color(for: state.memory.tone)
-        fps.textColor = Self.color(for: state.fps.tone)
+        cpu.dotColor = Self.color(for: state.cpu)
+        memory.dotColor = Self.color(for: state.memory)
+        fps.dotColor = Self.color(for: state.fps)
     }
 
     /// First layout: top trailing corner. Later ones (rotation, resize) pull it back on screen.
@@ -219,16 +238,16 @@ final class OverlayPanel: UIView {
     }
 
     private func render(cpu cpuText: String, memory memoryText: String, fps fpsText: String) {
-        cpu.text = "CPU \(cpuText)"
-        memory.text = "MEM \(memoryText)"
-        fps.text = "FPS \(fpsText)"
+        cpu.value = cpuText
+        memory.value = memoryText
+        fps.value = fpsText
         accessibilityLabel = "Performance: CPU \(cpuText), memory \(memoryText), \(fpsText) frames per second"
         setNeedsLayout()
         superview?.setNeedsLayout()
     }
 
     private func text(_ metric: WormaCeptorMetricState) -> String {
-        guard metric.isRunning else { return "off" }
+        guard metric.isRunning else { return "--" }
         // FPS reads per second: nothing until the first second has passed.
         if metric.metric == .fps && metric.history.isEmpty { return "--" }
         return metric.metric == .fps ? String(Int(metric.value.rounded())) : metric.valueText
@@ -248,20 +267,83 @@ final class OverlayPanel: UIView {
         }
     }
 
-    private static func label() -> UILabel {
-        let label = UILabel()
-        label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        label.textColor = .white
-        return label
+    /// Android's `MetricStatus` colors; grey while the monitor is off. A running monitor without a verdict (memory
+    /// with no limit to compare against, as on the simulator) reads as good, like Android's 0% heap.
+    private static func color(for metric: WormaCeptorMetricState) -> UIColor {
+        guard metric.isRunning else { return OverlayColors.inactive }
+        switch metric.tone {
+        case .warning: return OverlayColors.warning
+        case .error: return OverlayColors.critical
+        default: return OverlayColors.good
+        }
+    }
+}
+
+/// Android's `Palette.Overlay*` colors.
+private enum OverlayColors {
+    static let background = rgb(0x1C1C1E)
+    static let good = rgb(0x32D74B)
+    static let warning = rgb(0xFF9F0A)
+    static let critical = rgb(0xFF453A)
+    static let inactive = rgb(0x8E8E93)
+
+    private static func rgb(_ value: UInt32) -> UIColor {
+        UIColor(
+            red: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
+    }
+}
+
+/// One metric in the pill: 6 pt dot, 10 pt label, 13 pt monospaced value.
+private final class OverlayMetricView: UIView {
+    private let dot = UIView()
+    private let valueLabel = UILabel()
+
+    var value: String {
+        get { valueLabel.text ?? "" }
+        set { valueLabel.text = newValue }
     }
 
-    /// InspectorTheme's dark-mode status colors: the panel is always dark, so they keep their contrast on it.
-    private static func color(for tone: WormaCeptorStatusTone) -> UIColor {
-        switch tone {
-        case .success: return UIColor(red: 0x34 / 255, green: 0xD3 / 255, blue: 0x99 / 255, alpha: 1)
-        case .warning: return UIColor(red: 0xFB / 255, green: 0xBF / 255, blue: 0x24 / 255, alpha: 1)
-        case .error: return UIColor(red: 0xF8 / 255, green: 0x71 / 255, blue: 0x71 / 255, alpha: 1)
-        default: return .white
-        }
+    var dotColor: UIColor {
+        get { dot.backgroundColor ?? .clear }
+        set { dot.backgroundColor = newValue }
+    }
+
+    private static let dotSize: CGFloat = 6
+
+    init(label: String) {
+        super.init(frame: .zero)
+        dot.backgroundColor = OverlayColors.inactive
+        dot.layer.cornerRadius = Self.dotSize / 2
+        let name = UILabel()
+        name.attributedText = NSAttributedString(string: label, attributes: [
+            .font: UIFont.systemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: OverlayColors.inactive,
+            .kern: 0.5,
+        ])
+        valueLabel.font = .monospacedSystemFont(ofSize: 13, weight: .bold)
+        valueLabel.textColor = .white
+        let stack = UIStackView(arrangedSubviews: [dot, name, valueLabel])
+        stack.axis = .horizontal
+        stack.alignment = .center
+        stack.spacing = InspectorTheme.Spacing.xs
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: Self.dotSize),
+            dot.heightAnchor.constraint(equalToConstant: Self.dotSize),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
     }
 }

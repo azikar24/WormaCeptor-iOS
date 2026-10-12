@@ -104,271 +104,157 @@ struct CryptoScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    NavigationLink(destination: CryptoHistoryScreen(model: model)) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
+                    if !model.history.isEmpty {
+                        NavigationLink(destination: CryptoHistoryScreen(model: model)) {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .foregroundColor(InspectorTheme.secondaryText)
+                                .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
+                        }
+                        .accessibilityLabel("History")
                     }
-                    .accessibilityLabel("History")
                 }
             }
     }
 }
 
+/// Android's crypto tool: presets, collapsible advanced options, key and IV, input, then the result card.
 struct CryptoContent: View {
     @ObservedObject var model: CryptoModel
-    @State private var copied = false
+    @State private var isAdvancedExpanded = false
 
     var body: some View {
-        List {
-            Section("Presets") {
-                ForEach(CryptoPreset.allCases) { preset in
-                    presetRow(preset)
+        ScrollView {
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.lg) {
+                presetsCard
+                advancedCard
+                keyCard
+                inputCard
+                if let result = model.result {
+                    CryptoResultCard(result: result, model: model)
+                        .transition(InspectorMotion.expand)
                 }
             }
-            Section {
-                Picker("Algorithm", selection: $model.config.algorithm) {
-                    ForEach(CryptoAlgorithm.allCases) { Text($0.title).tag($0) }
-                }
-                Picker("Mode", selection: $model.config.mode) {
-                    ForEach(CipherMode.allCases) { Text($0.title).tag($0) }
-                }
-                Picker("Padding", selection: $model.config.padding) {
-                    ForEach(CryptoPadding.allCases) { Text($0.title).tag($0) }
-                }
-                .disabled(!model.config.mode.usesPadding)
-                Picker("Key format", selection: $model.config.keyFormat) {
-                    ForEach(KeyFormat.allCases) { Text($0.title).tag($0) }
-                }
-            } header: {
-                Text("Advanced")
-            } footer: {
-                if !model.config.mode.usesPadding {
-                    Text("\(model.config.mode.title) needs no padding.")
-                }
-            }
-            .frame(minHeight: InspectorTheme.minTouchTarget)
-
-            Section("Key (\(model.config.algorithm.keyBytes) bytes)") {
-                SecretField(title: "Key", text: $model.config.key)
-                Button("Generate key", action: model.generateKey)
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
-            }
-            if model.config.mode.requiresIv {
-                Section("IV (Initialization Vector)") {
-                    SecretField(title: "IV", text: $model.config.iv)
-                    Button("Generate IV", action: model.generateIv)
-                        .frame(minHeight: InspectorTheme.minTouchTarget)
-                }
-            }
-
-            Section("Input") {
-                TextEditor(text: $model.input)
-                    .font(.body.monospaced())
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .frame(minHeight: 96)
-                    .accessibilityLabel("Text to encrypt or decrypt")
-                HStack(spacing: InspectorTheme.Spacing.md) {
-                    runButton(.encrypt)
-                    runButton(.decrypt)
-                }
-                .padding(.vertical, InspectorTheme.Spacing.xs)
-            }
-
-            if let result = model.result {
-                resultSection(result)
-            }
+            .padding(InspectorTheme.Spacing.lg)
         }
-        .listStyle(.insetGrouped)
+        .inspectorDismissesKeyboardOnScroll()
+        .inspectorScreen()
+        .inspectorAnimation(InspectorMotion.standard(InspectorMotion.normal), value: model.result)
+        .inspectorAnimation(InspectorMotion.standard(InspectorMotion.normal), value: model.config.mode)
     }
 
-    private func presetRow(_ preset: CryptoPreset) -> some View {
-        let config = preset.config
-        let selected = model.config.algorithm == config.algorithm && model.config.mode == config.mode
-            && (!config.mode.usesPadding || model.config.padding == config.padding)
-        return Button { model.apply(preset) } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-                    Text(preset.title).foregroundColor(.primary)
-                    Text(preset.summary)
-                        .font(.footnote)
-                        .foregroundColor(InspectorTheme.secondaryText)
-                }
-                Spacer()
-                if selected {
-                    Image(systemName: "checkmark").foregroundColor(.accentColor).accessibilityHidden(true)
+    private var presetsCard: some View {
+        CryptoCard {
+            CryptoSectionTitle("Presets")
+            InspectorChipRow(inset: 0) {
+                ForEach(CryptoPreset.allCases) { preset in
+                    InspectorChip(label: preset.title, isSelected: isSelected(preset)) { model.apply(preset) }
+                        .accessibilityHint("\(preset.summary). Applies the preset and clears the key and IV")
                 }
             }
-            .frame(minHeight: InspectorTheme.minTouchTarget)
-            .contentShape(Rectangle())
         }
-        .accessibilityHint("Applies the preset and clears the key and IV")
-        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func isSelected(_ preset: CryptoPreset) -> Bool {
+        let config = preset.config
+        return model.config.algorithm == config.algorithm && model.config.mode == config.mode
+            && (!config.mode.usesPadding || model.config.padding == config.padding)
+    }
+
+    private var advancedCard: some View {
+        InspectorExpandableSection(isExpanded: $isAdvancedExpanded) {
+            Text("Advanced")
+                .font(InspectorFont.titleMedium)
+                .foregroundColor(InspectorTheme.textPrimary)
+        } content: {
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.md) {
+                chips("Algorithm", CryptoAlgorithm.allCases, title: \.title, selection: $model.config.algorithm)
+                chips("Mode", CipherMode.allCases, title: \.title, selection: $model.config.mode)
+                chips("Padding", CryptoPadding.allCases, title: \.title, selection: $model.config.padding)
+                    .disabled(!model.config.mode.usesPadding)
+                    .opacity(model.config.mode.usesPadding ? 1 : InspectorTheme.Alpha.strong)
+                if !model.config.mode.usesPadding {
+                    Text("\(model.config.mode.title) needs no padding.")
+                        .font(InspectorFont.labelSmall)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                }
+            }
+            .padding(.top, InspectorTheme.Spacing.sm)
+        }
+        .padding(.horizontal, InspectorTheme.Spacing.lg)
+        .padding(.vertical, InspectorTheme.Spacing.xs)
+        .inspectorCard(
+            fill: InspectorTheme.surface,
+            border: InspectorTheme.outlineVariant.opacity(InspectorTheme.Alpha.medium),
+            padding: 0
+        )
+    }
+
+    private var keyCard: some View {
+        CryptoCard {
+            chips("Key format", KeyFormat.allCases, title: \.title, selection: $model.config.keyFormat)
+            CryptoSecretField(
+                title: "Key (\(model.config.algorithm.keyBytes) bytes)",
+                name: "key",
+                systemImage: "key.fill",
+                text: $model.config.key,
+                onGenerate: model.generateKey
+            )
+            if model.config.mode.requiresIv {
+                CryptoSecretField(
+                    title: "IV (Initialization Vector)",
+                    name: "IV",
+                    systemImage: nil,
+                    text: $model.config.iv,
+                    onGenerate: model.generateIv
+                )
+                .transition(InspectorMotion.expand)
+            }
+        }
+    }
+
+    private var inputCard: some View {
+        CryptoCard {
+            CryptoSectionTitle("Input")
+            InspectorTextField(
+                label: "Enter text to encrypt/decrypt",
+                text: $model.input,
+                monospaced: true,
+                multiline: true
+            )
+            HStack(spacing: InspectorTheme.Spacing.md) {
+                runButton(.encrypt)
+                runButton(.decrypt)
+            }
+        }
     }
 
     private func runButton(_ operation: CryptoRun.Operation) -> some View {
         Button {
-            model.run(operation)
+            withInspectorAnimation(InspectorMotion.standard(InspectorMotion.normal)) { model.run(operation) }
         } label: {
-            Text(operation.rawValue)
-                .frame(maxWidth: .infinity, minHeight: InspectorTheme.minTouchTarget)
+            Text(operation.rawValue).frame(maxWidth: .infinity)
         }
-        .buttonStyle(.borderedProminent)
+        .buttonStyle(InspectorFilledButtonStyle())
         .disabled(!model.canRun)
+        .opacity(model.canRun ? 1 : InspectorTheme.Alpha.strong)
     }
 
-    @ViewBuilder
-    private func resultSection(_ result: CryptoRun) -> some View {
-        Section {
-            if let output = result.output {
-                Text(output)
-                    .font(.callout.monospaced())
-                    .textSelection(.enabled)
-                    .accessibilityLabel("Output")
-                    .accessibilityValue(output)
-                Button {
-                    UIPasteboard.general.string = output
-                    copied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                } label: {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
-                }
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-                Button {
-                    model.useAsInput(output)
-                } label: {
-                    Label("Use as input", systemImage: "arrow.up.doc")
-                }
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-            } else {
-                Text(result.error ?? "Unknown error")
-                    .foregroundColor(InspectorTheme.color(for: .error))
-                    .textSelection(.enabled)
-            }
-            Button("Clear result", role: .destructive, action: model.clearResult)
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-        } header: {
-            HStack {
-                Text("\(result.operation.rawValue) \(result.algorithm.title)/\(result.mode.title)")
-                Spacer()
-                InspectorBadge(
-                    text: result.output != nil ? "SUCCESS" : "FAILED",
-                    color: InspectorTheme.color(for: result.output != nil ? .success : .error)
-                )
-            }
-        }
-    }
-}
-
-/// A key or IV, hidden until revealed, with no autocorrection or capitalization.
-private struct SecretField: View {
-    let title: String
-    @Binding var text: String
-    @State private var isRevealed = false
-
-    var body: some View {
-        HStack {
-            Group {
-                if isRevealed {
-                    TextField(title, text: $text)
-                } else {
-                    SecureField(title, text: $text)
-                }
-            }
-            .font(.body.monospaced())
-            .autocorrectionDisabled()
-            .textInputAutocapitalization(.never)
-            Button {
-                isRevealed.toggle()
-            } label: {
-                Image(systemName: isRevealed ? "eye.slash" : "eye")
-                    .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(isRevealed ? "Hide \(title)" : "Show \(title)")
-        }
-    }
-}
-
-/// Past runs, newest first. Tap to load the input back, swipe to remove.
-struct CryptoHistoryScreen: View {
-    @ObservedObject var model: CryptoModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var confirmClear = false
-
-    var body: some View {
-        List {
-            if model.history.isEmpty {
-                VStack(spacing: InspectorTheme.Spacing.xs) {
-                    Text("No history yet").font(.headline)
-                    Text("Your encryption and decryption operations will appear here")
-                        .font(.footnote)
-                        .foregroundColor(InspectorTheme.secondaryText)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, InspectorTheme.Spacing.lg)
-            }
-            ForEach(model.history) { run in
-                Button {
-                    model.load(run)
-                    dismiss()
-                } label: {
-                    CryptoRunRow(run: run)
-                }
-                .swipeActions {
-                    Button("Remove", role: .destructive) { model.remove(run) }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Crypto history")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Clear all", role: .destructive) { confirmClear = true }
-                    .disabled(model.history.isEmpty)
-            }
-        }
-        .confirmationDialog("Clear history", isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("Clear all", role: .destructive, action: model.clearHistory)
-        } message: {
-            Text("Are you sure you want to clear all crypto history? This action cannot be undone.")
-        }
-    }
-}
-
-private struct CryptoRunRow: View {
-    let run: CryptoRun
-
-    var body: some View {
+    private func chips<Option: Identifiable & Hashable>(
+        _ title: String,
+        _ options: [Option],
+        title optionTitle: KeyPath<Option, String>,
+        selection: Binding<Option>
+    ) -> some View {
         VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
-            HStack {
-                InspectorBadge(
-                    text: run.operation.rawValue.uppercased(),
-                    color: InspectorTheme.color(for: run.output != nil ? .success : .error)
-                )
-                Text("\(run.algorithm.title)/\(run.mode.title)")
-                    .font(.footnote.monospaced())
-                    .foregroundColor(.primary)
-                Spacer()
-                Text(run.date.formatted(date: .omitted, time: .standard))
-                    .font(.footnote.monospacedDigit())
-                    .foregroundColor(InspectorTheme.secondaryText)
+            CryptoSectionTitle(title)
+            InspectorChipRow(inset: 0) {
+                ForEach(options) { option in
+                    InspectorChip(label: option[keyPath: optionTitle], isSelected: selection.wrappedValue == option) {
+                        selection.wrappedValue = option
+                    }
+                }
             }
-            Text(run.input)
-                .font(.callout.monospaced())
-                .foregroundColor(.primary)
-                .lineLimit(1)
-            Text(run.output ?? run.error ?? "")
-                .font(.footnote.monospaced())
-                .foregroundColor(run.output != nil ? InspectorTheme.secondaryText : InspectorTheme.color(for: .error))
-                .lineLimit(2)
         }
-        .padding(.vertical, InspectorTheme.Spacing.xs)
-        .frame(minHeight: InspectorTheme.minTouchTarget)
-        .accessibilityElement(children: .combine)
-        .accessibilityHint("Loads the input back into the crypto tool")
     }
 }
 
@@ -378,6 +264,14 @@ private struct CryptoRunRow: View {
         CryptoContent(model: PreviewSamples.crypto())
             .navigationTitle("Crypto")
     }
+}
+
+#Preview("Crypto dark") {
+    NavigationView {
+        CryptoContent(model: PreviewSamples.crypto())
+            .navigationTitle("Crypto")
+    }
+    .preferredColorScheme(.dark)
 }
 
 #Preview("Crypto history") {

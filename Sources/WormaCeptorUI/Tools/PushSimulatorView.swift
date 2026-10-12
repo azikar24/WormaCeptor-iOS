@@ -98,6 +98,10 @@ struct PushSimulatorScreen: View {
             isSending: model.isSending,
             onSend: { delayed in Task { await model.send(delayed: delayed) } },
             onLoad: model.load,
+            onSendTemplate: { template in
+                model.load(template)
+                Task { await model.send(delayed: false) }
+            },
             onSave: model.save,
             onDelete: model.delete
         )
@@ -105,6 +109,7 @@ struct PushSimulatorScreen: View {
     }
 }
 
+/// Android's push simulator: template cards on top, the form with its live preview, then save and send.
 struct PushSimulatorContent: View {
     @Binding var draft: PushDraft
     let templates: [WormaCeptorPushTemplate]
@@ -113,129 +118,120 @@ struct PushSimulatorContent: View {
     let isSending: Bool
     let onSend: (_ delayed: Bool) -> Void
     let onLoad: (WormaCeptorPushTemplate) -> Void
+    let onSendTemplate: (WormaCeptorPushTemplate) -> Void
     let onSave: (String) -> Void
     let onDelete: (WormaCeptorPushTemplate) -> Void
 
     @State private var templateName = ""
+    @State private var isNamingTemplate = false
 
     var body: some View {
-        Form {
-            notificationSection
-            dataSection
-            sendSection
-            templatesSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.lg) {
+                PushTemplatesRow(templates: templates, onLoad: onLoad, onSend: onSendTemplate, onDelete: onDelete)
+                PushFormCard(draft: $draft)
+                actions
+                if let outcome {
+                    Text(outcome.message)
+                        .font(InspectorFont.body)
+                        .foregroundColor(InspectorTheme.color(for: outcome.isSent ? .success : .error))
+                }
+                if !statusText.isEmpty {
+                    Text(statusText)
+                        .font(InspectorFont.bodySmall)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                }
+            }
+            .padding(InspectorTheme.Spacing.lg)
         }
+        .inspectorDismissesKeyboardOnScroll()
+        .inspectorScreen()
         .navigationTitle("Push simulator")
         .navigationBarTitleDisplayMode(.inline)
-    }
-
-    private var notificationSection: some View {
-        Section {
-            TextField("Title", text: limited($draft.title, to: PushDraft.titleLimit))
-            TextField("Body", text: limited($draft.body, to: PushDraft.bodyLimit))
-            Picker("Priority", selection: $draft.priority) {
-                ForEach(WormaCeptorPushPriority.entries, id: \.self) { priority in
-                    Text(priority.name.capitalized).tag(priority)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    draft = PushDraft()
+                } label: {
+                    Image(systemName: "xmark")
+                        .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
                 }
+                .tint(InspectorTheme.brand)
+                .accessibilityLabel("Clear form")
             }
-            TextField("Thread (Android channel)", text: $draft.threadId)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-        } header: {
-            Text("Notification")
-        } footer: {
-            Text("Low is passive, default is active, high and max are time sensitive (critical alerts need an entitlement). The thread groups notifications, the closest thing iOS has to a channel.")
         }
+        .inspectorAnimation(InspectorMotion.standard(InspectorMotion.normal), value: isNamingTemplate)
     }
 
-    private var dataSection: some View {
-        Section {
-            ForEach($draft.data) { $row in
-                HStack {
-                    TextField("Key", text: $row.key)
-                    TextField("Value", text: $row.value)
+    private var actions: some View {
+        let canSend = draft.canSend && !isSending
+        return VStack(spacing: InspectorTheme.Spacing.sm) {
+            HStack(spacing: InspectorTheme.Spacing.md) {
+                Button {
+                    isNamingTemplate.toggle()
+                } label: {
+                    Label("Save template", systemImage: "square.and.arrow.down").frame(maxWidth: .infinity)
                 }
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
+                .buttonStyle(InspectorOutlinedButtonStyle())
+                .disabled(!draft.canSend)
+                .opacity(draft.canSend ? 1 : InspectorTheme.Alpha.strong)
+                Button {
+                    onSend(false)
+                } label: {
+                    Label("Send", systemImage: "paperplane.fill").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(InspectorFilledButtonStyle())
+                .disabled(!canSend)
+                .opacity(canSend ? 1 : InspectorTheme.Alpha.strong)
             }
-            .onDelete { draft.data.remove(atOffsets: $0) }
-            Button {
-                draft.data.append(PushDraft.DataRow())
-            } label: {
-                Label("Add key", systemImage: "plus")
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
+            if isNamingTemplate {
+                saveTemplateField.transition(InspectorMotion.expand)
             }
-        } header: {
-            Text("Data")
-        } footer: {
-            Text("Delivered as the notification's userInfo.")
-        }
-    }
-
-    private var sendSection: some View {
-        Section {
-            Button {
-                onSend(false)
-            } label: {
-                Label("Send", systemImage: "paperplane")
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
-            }
-            .disabled(!draft.canSend || isSending)
             Button {
                 onSend(true)
             } label: {
                 Label("Send in \(Int(WormaCeptorPushSimulator.shared.LeaveAppDelaySeconds)) s", systemImage: "timer")
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
+                    .frame(maxWidth: .infinity)
             }
-            .disabled(!draft.canSend || isSending)
+            .buttonStyle(InspectorOutlinedButtonStyle())
+            .disabled(!canSend)
+            .opacity(canSend ? 1 : InspectorTheme.Alpha.strong)
             .accessibilityHint("Gives you time to leave the app before it arrives")
-            if let outcome {
-                Text(outcome.message)
-                    .font(.callout)
-                    .foregroundColor(InspectorTheme.color(for: outcome.isSent ? .success : .error))
-            }
-        } footer: {
-            Text(statusText)
         }
     }
 
-    private var templatesSection: some View {
-        Section("Templates") {
-            ForEach(templates, id: \.id) { template in
-                Button {
-                    onLoad(template)
-                } label: {
-                    VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-                        Text(template.name)
-                            .foregroundColor(.primary)
-                        Text(template.notification.title)
-                            .font(.caption)
-                            .foregroundColor(InspectorTheme.secondaryText)
-                    }
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
+    private var saveTemplateField: some View {
+        let isValid = !templateName.trimmingCharacters(in: .whitespaces).isEmpty
+        return VStack(alignment: .leading, spacing: InspectorTheme.Spacing.md) {
+            InspectorTextField(
+                label: "Template name",
+                text: $templateName,
+                placeholder: "e.g., Welcome Message",
+                supporting: "Give your notification a name for quick access later."
+            )
+            HStack(spacing: InspectorTheme.Spacing.md) {
+                Spacer()
+                Button("Cancel") {
+                    isNamingTemplate = false
+                    templateName = ""
                 }
-                .accessibilityHint("Loads it into the form")
-                .swipeActions {
-                    if !template.isBuiltIn {
-                        Button(role: .destructive) {
-                            onDelete(template)
-                        } label: {
-                            Label("Delete", systemImage: "trash")
-                        }
-                    }
-                }
-            }
-            HStack {
-                TextField("Template name", text: $templateName)
+                .buttonStyle(InspectorOutlinedButtonStyle())
                 Button("Save") {
                     onSave(templateName)
                     templateName = ""
+                    isNamingTemplate = false
                 }
-                .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
-                .disabled(templateName.trimmingCharacters(in: .whitespaces).isEmpty || !draft.canSend)
+                .buttonStyle(InspectorFilledButtonStyle())
+                .disabled(!isValid)
+                .opacity(isValid ? 1 : InspectorTheme.Alpha.strong)
                 .accessibilityLabel("Save as template")
             }
         }
+        .inspectorCard(
+            fill: InspectorTheme.surface,
+            border: InspectorTheme.outlineVariant.opacity(InspectorTheme.Alpha.medium),
+            padding: InspectorTheme.Spacing.lg
+        )
     }
 
     private var statusText: String {
@@ -251,14 +247,10 @@ struct PushSimulatorContent: View {
         }
         return "Notifications show while the app is open."
     }
-
-    private func limited(_ text: Binding<String>, to limit: Int) -> Binding<String> {
-        Binding(get: { text.wrappedValue }, set: { text.wrappedValue = String($0.prefix(limit)) })
-    }
 }
 
 #if DEBUG
-#Preview("Push simulator") {
+private func pushSimulatorPreview() -> some View {
     NavigationView {
         PushSimulatorContent(
             draft: .constant(PushDraft(PreviewSamples.pushTemplates[1].notification)),
@@ -268,9 +260,18 @@ struct PushSimulatorContent: View {
             isSending: false,
             onSend: { _ in },
             onLoad: { _ in },
+            onSendTemplate: { _ in },
             onSave: { _ in },
             onDelete: { _ in }
         )
     }
+}
+
+#Preview("Push simulator") {
+    pushSimulatorPreview()
+}
+
+#Preview("Push simulator dark") {
+    pushSimulatorPreview().preferredColorScheme(.dark)
 }
 #endif

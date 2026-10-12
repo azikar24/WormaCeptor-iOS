@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WormaCeptor
 
 final class CrashListModel: ObservableObject {
@@ -21,7 +22,7 @@ final class CrashListModel: ObservableObject {
     }
 }
 
-/// Crashes of earlier launches, newest first, with clear.
+/// Crashes of earlier launches, newest first, with export and clear.
 struct CrashListScreen: View {
     @StateObject private var model = CrashListModel()
 
@@ -37,94 +38,80 @@ struct CrashListContent: View {
     @State private var isConfirmingClear = false
 
     var body: some View {
-        List(rows, id: \.id) { row in
-            NavigationLink(destination: CrashDetailScreen(id: row.id)) {
-                CrashRowView(row: row)
+        ScrollView {
+            LazyVStack(spacing: InspectorTheme.Spacing.sm) {
+                ForEach(rows, id: \.id) { row in
+                    NavigationLink(destination: CrashDetailScreen(id: row.id)) {
+                        CrashRowCard(row: row)
+                    }
+                    .buttonStyle(InspectorPressStyle())
+                    .transition(InspectorMotion.expand)
+                }
             }
+            .padding(InspectorTheme.Spacing.md)
         }
-        .listStyle(.plain)
+        .inspectorAnimation(InspectorMotion.standard(InspectorMotion.normal), value: rows.map(\.id))
         .overlay {
             if rows.isEmpty {
-                EmptyStateView(
-                    systemImage: "checkmark.shield",
-                    title: "No crashes",
-                    message: "When the app crashes, the crash shows up here on the next launch."
+                InspectorEmptyState(
+                    systemImage: "ladybug",
+                    title: "No crashes captured",
+                    message: "Your app is running smoothly. A crash shows up here on the next launch."
                 )
             }
         }
+        .inspectorScreen()
         .navigationTitle("Crashes")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(role: .destructive) {
-                    isConfirmingClear = true
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
-                }
-                .accessibilityLabel("Clear crashes")
-                .disabled(rows.isEmpty)
+            ToolbarItem(placement: .primaryAction) { menu }
+        }
+        .alert("Clear all crashes?", isPresented: $isConfirmingClear) {
+            Button("Cancel", role: .cancel) {}
+            Button("Clear", role: .destructive) {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                onClear()
             }
+        } message: {
+            Text("This will permanently delete all captured crash reports. This action cannot be undone.")
         }
-        .confirmationDialog("Clear all crashes?", isPresented: $isConfirmingClear, titleVisibility: .visible) {
-            Button("Clear", role: .destructive, action: onClear)
+    }
+
+    /// Android's overflow menu on the Crashes tab: export, clear all.
+    private var menu: some View {
+        Menu {
+            if #available(iOS 16.0, *) {
+                ShareLink(item: CrashExport.json(rows)) {
+                    Label("Export crashes", systemImage: "square.and.arrow.up")
+                }
+            }
+            Button(role: .destructive) {
+                isConfirmingClear = true
+            } label: {
+                Label("Clear all crashes", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
         }
+        .accessibilityLabel("Crash actions")
+        .disabled(rows.isEmpty)
     }
 }
 
-struct CrashRowView: View {
-    let row: WormaCeptorCrashRow
-
-    private var when: String {
-        CrashFormat.relative(row.timestampMs)
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: InspectorTheme.Spacing.md) {
-            Image(systemName: "exclamationmark.octagon.fill")
-                .foregroundColor(InspectorTheme.color(for: .error))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
-                Text(row.exceptionType)
-                    .font(.system(.subheadline, design: .monospaced).weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if let message = row.message, !message.isEmpty {
-                    Text(message)
-                        .font(.subheadline)
-                        .lineLimit(2)
-                }
-                HStack(spacing: InspectorTheme.Spacing.sm) {
-                    if let location = row.location {
-                        Text(location)
-                            .font(.system(.caption, design: .monospaced))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: InspectorTheme.Spacing.sm)
-                    Text(when)
-                        .font(.caption)
-                }
-                .foregroundColor(InspectorTheme.secondaryText)
-            }
+/// Android's crash export as JSON. The list rows carry no stack trace, so the export has the location instead.
+enum CrashExport {
+    static func json(_ rows: [WormaCeptorCrashRow]) -> String {
+        let objects: [[String: Any]] = rows.map { row in
+            [
+                "timestamp": row.timestampMs,
+                "exceptionType": row.exceptionType,
+                "message": row.message ?? "",
+                "location": row.location ?? "",
+            ]
         }
-        .padding(.vertical, InspectorTheme.Spacing.xs)
-        .frame(minHeight: InspectorTheme.minTouchTarget)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel([row.exceptionType, row.message, row.location, when].compactMap { $0 }.joined(separator: ", "))
-    }
-}
-
-enum CrashFormat {
-    static func date(_ epochMillis: Int64) -> Date {
-        Date(timeIntervalSince1970: TimeInterval(epochMillis) / 1000)
-    }
-
-    static func relative(_ epochMillis: Int64) -> String {
-        date(epochMillis).formatted(.relative(presentation: .named))
-    }
-
-    static func full(_ epochMillis: Int64) -> String {
-        date(epochMillis).formatted(date: .abbreviated, time: .standard)
+        guard let data = try? JSONSerialization.data(withJSONObject: objects, options: [.prettyPrinted, .sortedKeys])
+        else { return "[]" }
+        return String(decoding: data, as: UTF8.self)
     }
 }
 
@@ -133,6 +120,13 @@ enum CrashFormat {
     NavigationView {
         CrashListContent(rows: PreviewSamples.crashRows, onClear: {})
     }
+}
+
+#Preview("Crashes, dark") {
+    NavigationView {
+        CrashListContent(rows: PreviewSamples.crashRows, onClear: {})
+    }
+    .preferredColorScheme(.dark)
 }
 
 #Preview("Crashes, empty") {

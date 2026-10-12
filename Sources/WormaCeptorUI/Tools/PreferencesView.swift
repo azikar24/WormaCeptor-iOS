@@ -13,11 +13,13 @@ enum PreferenceEdit {
 @MainActor
 final class PreferencesModel: ObservableObject {
     @Published private(set) var domains: [WormaCeptorDefaultsDomain] = []
+    @Published private(set) var isLoaded = false
 
     private let defaults = WormaCeptorUserDefaults.shared
 
     func refresh() {
         domains = defaults.domains()
+        isLoaded = true
     }
 
     func save(domain: String, key: String, edit: PreferenceEdit) {
@@ -41,7 +43,7 @@ struct PreferencesScreen: View {
     @StateObject private var model = PreferencesModel()
 
     var body: some View {
-        PreferenceDomainsContent(domains: model.domains) { domain in
+        PreferenceDomainsContent(domains: model.domains, isLoaded: model.isLoaded) { domain in
             PreferenceEntriesScreen(model: model, domain: domain.name)
         }
         .onAppear { model.refresh() }
@@ -49,34 +51,92 @@ struct PreferencesScreen: View {
     }
 }
 
+/// Android's preference file list: surface cards with a folder tile, the name and the key count.
 struct PreferenceDomainsContent<Destination: View>: View {
     let domains: [WormaCeptorDefaultsDomain]
+    var isLoaded = true
     @ViewBuilder let destination: (WormaCeptorDefaultsDomain) -> Destination
 
+    @State private var search = ""
+    @State private var isSearching = false
+
+    private var visible: [WormaCeptorDefaultsDomain] {
+        search.isEmpty ? domains : domains.filter { $0.name.localizedCaseInsensitiveContains(search) }
+    }
+
     var body: some View {
-        List(domains, id: \.name) { domain in
-            NavigationLink(destination: destination(domain)) {
-                HStack(spacing: InspectorTheme.Spacing.md) {
-                    Text(domain.name)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                    Spacer(minLength: InspectorTheme.Spacing.sm)
-                    Text("\(domain.entries.count)")
-                        .font(.callout.monospacedDigit())
-                        .foregroundColor(InspectorTheme.secondaryText)
+        VStack(spacing: 0) {
+            InspectorCollapsibleSearch(isActive: isSearching, placeholder: "Search domains", text: $search)
+            InspectorLoadable(isLoading: !isLoaded, isEmpty: visible.isEmpty) {
+                InspectorEmptyState(
+                    systemImage: "gearshape",
+                    title: search.isEmpty ? "No defaults" : "No matches",
+                    message: search.isEmpty ? "Domains show up here once the app stores a value." : "Try a different search."
+                )
+            } content: {
+                ScrollView {
+                    LazyVStack(spacing: InspectorTheme.Spacing.sm) {
+                        ForEach(visible, id: \.name) { domain in
+                            NavigationLink(destination: destination(domain)) {
+                                PreferenceDomainRow(domain: domain)
+                            }
+                            .buttonStyle(InspectorPressStyle())
+                        }
+                    }
+                    .padding(.horizontal, InspectorTheme.Spacing.md)
+                    .padding(.vertical, InspectorTheme.Spacing.sm)
                 }
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(domain.name), \(domain.entries.count) keys")
             }
         }
-        .listStyle(.insetGrouped)
-        .overlay {
-            if domains.isEmpty {
-                EmptyStateView(systemImage: "slider.horizontal.3", title: "No defaults", message: "Nothing is stored yet.")
-            }
-        }
+        .inspectorScreen()
         .navigationTitle("UserDefaults")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                InspectorSearchButton(isActive: $isSearching, text: $search)
+            }
+        }
+    }
+}
+
+private struct PreferenceDomainRow: View {
+    let domain: WormaCeptorDefaultsDomain
+
+    var body: some View {
+        let count = domain.entries.count
+        HStack(spacing: InspectorTheme.Spacing.md) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: InspectorTheme.IconSize.md - 2))
+                .foregroundColor(InspectorTheme.brand)
+                .frame(width: InspectorTheme.minTouchTarget, height: InspectorTheme.minTouchTarget)
+                .background(
+                    RoundedRectangle(cornerRadius: InspectorTheme.Radius.sm)
+                        .fill(InspectorTheme.brand.opacity(InspectorTheme.Alpha.light))
+                )
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
+                Text(domain.name)
+                    .font(InspectorFont.listHeadline)
+                    .foregroundColor(InspectorTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(count == 1 ? "1 item" : "\(count) items")
+                    .font(InspectorFont.bodySmall)
+                    .foregroundColor(InspectorTheme.secondaryText)
+            }
+            Spacer(minLength: InspectorTheme.Spacing.sm)
+            Image(systemName: "arrow.right")
+                .font(.system(size: InspectorTheme.IconSize.sm - 2, weight: .semibold))
+                .foregroundColor(InspectorTheme.secondaryText.opacity(InspectorTheme.Alpha.bold))
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, InspectorTheme.Spacing.lg)
+        .padding(.vertical, InspectorTheme.Spacing.md)
+        .background(RoundedRectangle(cornerRadius: InspectorTheme.Radius.md).fill(InspectorTheme.surface))
+        .contentShape(RoundedRectangle(cornerRadius: InspectorTheme.Radius.md))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(domain.name), \(count) keys")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
@@ -90,6 +150,12 @@ struct PreferenceEntriesScreen: View {
             onSave: { entry, edit in model.save(domain: domain, key: entry.key, edit: edit) },
             onDelete: { entry in model.delete(domain: domain, key: entry.key) }
         )
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                let count = model.domains.first { $0.name == domain }?.entries.count ?? 0
+                InspectorNavigationTitle(title: domain, subtitle: count == 1 ? "1 item" : "\(count) items")
+            }
+        }
         .navigationTitle(domain)
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { model.refresh() }
@@ -102,43 +168,53 @@ private struct EditTarget: Identifiable {
     var id: String { entry.key }
 }
 
-/// One domain's keys: search, tap to edit strings, numbers and booleans, swipe to delete.
+/// One domain's keys as Android's preference cards: search, type chips, tap to edit, swipe to delete.
 struct PreferenceEntriesContent: View {
     let entries: [WormaCeptorDefaultsEntry]
     let onSave: (WormaCeptorDefaultsEntry, PreferenceEdit) -> Void
     let onDelete: (WormaCeptorDefaultsEntry) -> Void
 
     @State private var search = ""
+    @State private var isSearching = false
+    @State private var typeFilter: WormaCeptorDefaultsType?
+    @State private var expandedKeys: Set<String> = []
     @State private var editing: EditTarget?
     @State private var pendingDelete: WormaCeptorDefaultsEntry?
 
     private var filtered: [WormaCeptorDefaultsEntry] {
-        guard !search.isEmpty else { return entries }
-        return entries.filter { $0.key.localizedCaseInsensitiveContains(search) || $0.value.localizedCaseInsensitiveContains(search) }
+        entries.filter { entry in
+            (typeFilter == nil || entry.type == typeFilter)
+                && (search.isEmpty || entry.key.localizedCaseInsensitiveContains(search)
+                    || entry.value.localizedCaseInsensitiveContains(search))
+        }
+    }
+
+    private var availableTypes: [WormaCeptorDefaultsType] {
+        entries.reduce(into: [WormaCeptorDefaultsType]()) { types, entry in
+            if !types.contains(entry.type) { types.append(entry.type) }
+        }
     }
 
     var body: some View {
-        List(filtered, id: \.key) { entry in
-            PreferenceRowView(entry: entry) {
-                editing = EditTarget(entry: entry)
+        VStack(spacing: 0) {
+            InspectorCollapsibleSearch(isActive: isSearching, placeholder: "Search keys and values", text: $search)
+            if !availableTypes.isEmpty {
+                typeChips.padding(.vertical, InspectorTheme.Spacing.xs)
             }
-            .swipeActions(edge: .trailing) {
-                Button(role: .destructive) {
-                    pendingDelete = entry
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
+            if filtered.isEmpty {
+                InspectorEmptyState(
+                    systemImage: "key",
+                    title: entries.isEmpty ? "No keys" : "No matches",
+                    message: entries.isEmpty ? "This domain is empty." : "Try adjusting the search or filters."
+                )
+            } else {
+                list
             }
         }
-        .listStyle(.plain)
-        .searchable(text: $search, prompt: "Search keys and values")
-        .overlay {
-            if filtered.isEmpty {
-                EmptyStateView(
-                    systemImage: "magnifyingglass",
-                    title: entries.isEmpty ? "No keys" : "No matches",
-                    message: entries.isEmpty ? "This domain is empty." : "Nothing matches \"\(search)\"."
-                )
+        .inspectorScreen()
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                InspectorSearchButton(isActive: $isSearching, text: $search)
             }
         }
         .sheet(item: $editing) { target in
@@ -155,31 +231,77 @@ struct PreferenceEntriesContent: View {
             Text("The key is removed from UserDefaults.")
         }
     }
+
+    private var typeChips: some View {
+        InspectorChipRow {
+            InspectorChip(label: "All", isSelected: typeFilter == nil) { typeFilter = nil }
+            ForEach(availableTypes, id: \.self) { type in
+                InspectorChip(label: type.label, isSelected: typeFilter == type) {
+                    typeFilter = typeFilter == type ? nil : type
+                }
+            }
+        }
+    }
+
+    private var list: some View {
+        List(filtered, id: \.key) { entry in
+            PreferenceRowView(entry: entry, isExpanded: expandedKeys.contains(entry.key)) {
+                if entry.type.isEditable {
+                    editing = EditTarget(entry: entry)
+                } else {
+                    withInspectorAnimation(InspectorMotion.standard(InspectorMotion.normal)) {
+                        expandedKeys.formSymmetricDifference([entry.key])
+                    }
+                }
+            }
+            .inspectorCardRow()
+            .swipeActions(edge: .trailing) {
+                Button(role: .destructive) {
+                    pendingDelete = entry
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
+        .inspectorPlainList()
+    }
 }
 
+/// Android's `PreferenceItemCard`: key with a key glyph, the value in mono under it, a colored type badge.
 struct PreferenceRowView: View {
     let entry: WormaCeptorDefaultsEntry
-    let onEdit: () -> Void
+    var isExpanded = false
+    let onTap: () -> Void
 
     var body: some View {
-        let content = VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
+        Button(action: onTap) {
             HStack(spacing: InspectorTheme.Spacing.sm) {
-                Text(entry.key)
-                    .font(.body.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: InspectorTheme.Spacing.sm)
-                InspectorBadge(text: entry.type.label, color: InspectorTheme.color(for: .neutral))
+                VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
+                    HStack(spacing: InspectorTheme.Spacing.sm) {
+                        Image(systemName: "key.fill")
+                            .font(.system(size: InspectorTheme.IconSize.xs - 2))
+                            .foregroundColor(InspectorTheme.secondaryText)
+                            .accessibilityHidden(true)
+                        Text(entry.key)
+                            .font(InspectorFont.bodyMedium.monospaced())
+                            .foregroundColor(InspectorTheme.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Text(entry.value)
+                        .font(InspectorFont.code)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                        .lineLimit(isExpanded ? nil : 2)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                InspectorBadge(text: entry.type.label, color: PreferenceTypeColor.color(for: entry.type), font: InspectorFont.overline)
             }
-            Text(entry.value)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(InspectorTheme.secondaryText)
-                .lineLimit(3)
+            .inspectorCard(fill: InspectorTheme.surface, padding: InspectorTheme.Spacing.lg)
         }
-        .padding(.vertical, InspectorTheme.Spacing.xs)
-        .frame(minHeight: InspectorTheme.minTouchTarget)
-        .contentShape(Rectangle())
+        .buttonStyle(InspectorPressStyle())
         .accessibilityElement(children: .combine)
+        .accessibilityHint(entry.type.isEditable ? "Edits the value" : (isExpanded ? "Shows less" : "Shows the full value"))
         .contextMenu {
             Button {
                 UIPasteboard.general.string = entry.value
@@ -187,95 +309,20 @@ struct PreferenceRowView: View {
                 Label("Copy value", systemImage: "doc.on.doc")
             }
         }
-
-        if entry.type.isEditable {
-            Button(action: onEdit) { content }
-                .buttonStyle(.plain)
-                .accessibilityHint("Edits the value")
-        } else {
-            content
-        }
     }
 }
 
-struct PreferenceEditSheet: View {
-    let entry: WormaCeptorDefaultsEntry
-    let onSave: (PreferenceEdit) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var text: String
-    @State private var flag: Bool
-
-    init(entry: WormaCeptorDefaultsEntry, onSave: @escaping (PreferenceEdit) -> Void) {
-        self.entry = entry
-        self.onSave = onSave
-        _text = State(initialValue: entry.value)
-        _flag = State(initialValue: entry.value == "true")
-    }
-
-    /// Nil while the text isn't a valid number for a number entry.
-    private var edit: PreferenceEdit? {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        switch entry.type {
-        case .boolean: return .boolean(flag)
-        case .integer: return Int64(trimmed).map(PreferenceEdit.integer)
-        case .decimal: return Double(trimmed).map(PreferenceEdit.double)
-        default: return .string(text)
-        }
-    }
-
-    var body: some View {
-        NavigationView {
-            Form {
-                Section("Key") {
-                    Text(entry.key)
-                        .textSelection(.enabled)
-                }
-                Section {
-                    valueField
-                } header: {
-                    Text(entry.type.label)
-                } footer: {
-                    if edit == nil {
-                        Text(entry.type == .integer ? "Enter a whole number." : "Enter a number.")
-                            .foregroundColor(InspectorTheme.color(for: .error))
-                    }
-                }
-            }
-            .navigationTitle("Edit value")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        if let edit {
-                            onSave(edit)
-                            dismiss()
-                        }
-                    }
-                    .disabled(edit == nil)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var valueField: some View {
-        switch entry.type {
-        case .boolean:
-            Toggle(entry.key, isOn: $flag)
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-        case .integer, .decimal:
-            TextField("Value", text: $text)
-                .keyboardType(.numbersAndPunctuation)
-                .font(.body.monospacedDigit())
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-        default:
-            TextEditor(text: $text)
-                .font(.system(.body, design: .monospaced))
-                .frame(minHeight: InspectorTheme.minTouchTarget * 3)
-                .accessibilityLabel("Value")
+/// Android's `ToolColors.Preferences` type colors; light shades are darker so the badge text reaches 4.5:1.
+enum PreferenceTypeColor {
+    static func color(for type: WormaCeptorDefaultsType) -> Color {
+        switch type {
+        case .string: return InspectorTheme.dynamic(light: 0x2E7D32, dark: 0x81C784)
+        case .integer: return InspectorTheme.dynamic(light: 0x1565C0, dark: 0x64B5F6)
+        case .decimal: return InspectorTheme.dynamic(light: 0x7B1FA2, dark: 0xBA68C8)
+        case .boolean: return InspectorTheme.dynamic(light: 0xC2410C, dark: 0xFFB74D)
+        case .array: return InspectorTheme.dynamic(light: 0x00838F, dark: 0x4DD0E1)
+        case .dictionary: return InspectorTheme.dynamic(light: 0x3949AB, dark: 0x7986CB)
+        default: return InspectorTheme.color(for: .neutral)
         }
     }
 }
@@ -289,14 +336,29 @@ struct PreferenceEditSheet: View {
     }
 }
 
+#Preview("Defaults domains, dark") {
+    NavigationView {
+        PreferenceDomainsContent(domains: PreviewSamples.defaultsDomains) { domain in
+            Text(domain.name)
+        }
+    }
+    .preferredColorScheme(.dark)
+}
+
 #Preview("Defaults entries") {
     NavigationView {
         PreferenceEntriesContent(entries: PreviewSamples.defaultsDomains[0].entries, onSave: { _, _ in }, onDelete: { _ in })
             .navigationTitle("com.wormadev.wormaceptor.sample")
+            .navigationBarTitleDisplayMode(.inline)
     }
 }
 
-#Preview("Edit a string") {
-    PreferenceEditSheet(entry: PreviewSamples.defaultsDomains[0].entries[0]) { _ in }
+#Preview("Defaults entries, dark") {
+    NavigationView {
+        PreferenceEntriesContent(entries: PreviewSamples.defaultsDomains[0].entries, onSave: { _, _ in }, onDelete: { _ in })
+            .navigationTitle("com.wormadev.wormaceptor.sample")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+    .preferredColorScheme(.dark)
 }
 #endif

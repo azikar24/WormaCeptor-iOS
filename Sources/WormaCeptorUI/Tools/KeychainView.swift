@@ -6,121 +6,233 @@ struct KeychainScreen: View {
     @StateObject private var model = SnapshotModel(initial: [WormaCeptorKeychainItem]()) {
         try await WormaCeptorKeychain.shared.items()
     }
-    @State private var search = ""
+    @State private var isRefreshing = false
 
     var body: some View {
-        KeychainContent(items: filtered, search: search)
-            .overlay {
-                if let error = model.error {
-                    EmptyStateView(systemImage: "exclamationmark.triangle", title: "Couldn't read the Keychain", message: error)
-                } else if !model.isLoaded {
-                    ProgressView()
+        KeychainContent(items: model.value, isLoaded: model.isLoaded, error: model.error)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    InspectorRefreshButton(isRefreshing: isRefreshing) { Task { await refresh() } }
                 }
             }
-            .searchable(text: $search, prompt: "Key or value")
-            .navigationTitle("Keychain")
-            .navigationBarTitleDisplayMode(.inline)
             .task { await model.refresh() }
             .refreshable { await model.refresh() }
     }
 
-    private var filtered: [WormaCeptorKeychainItem] {
-        guard !search.isEmpty else { return model.value }
-        return model.value.filter {
-            $0.key.localizedCaseInsensitiveContains(search) || ($0.value?.localizedCaseInsensitiveContains(search) ?? false)
-        }
+    private func refresh() async {
+        isRefreshing = true
+        await model.refresh()
+        isRefreshing = false
     }
 }
 
+/// Android's secure storage screen: per-class counts, class chips, then one card per item.
 struct KeychainContent: View {
     let items: [WormaCeptorKeychainItem]
-    var search = ""
+    var isLoaded = true
+    var error: String?
+
+    @State private var search = ""
+    @State private var isSearching = false
+    @State private var selectedType: KeychainClass?
+
+    private var filtered: [WormaCeptorKeychainItem] {
+        items.filter { item in
+            (selectedType == nil || item.storageType == selectedType?.rawValue)
+                && (search.isEmpty || item.key.localizedCaseInsensitiveContains(search)
+                    || (item.value?.localizedCaseInsensitiveContains(search) ?? false))
+        }
+    }
 
     var body: some View {
-        List {
-            ForEach(kinds, id: \.self) { kind in
-                Section(kind) {
-                    ForEach(Array(items.filter { $0.kind == kind }.enumerated()), id: \.offset) { _, item in
-                        NavigationLink(destination: KeychainItemScreen(item: item)) {
-                            KeychainRowView(item: item)
+        VStack(spacing: 0) {
+            InspectorCollapsibleSearch(isActive: isSearching, placeholder: "Key or value", text: $search)
+            summary
+                .padding(.horizontal, InspectorTheme.Spacing.lg)
+                .padding(.top, InspectorTheme.Spacing.sm)
+            chips.padding(.vertical, InspectorTheme.Spacing.xs)
+            if let error {
+                Text(error)
+                    .font(InspectorFont.bodySmall)
+                    .foregroundColor(InspectorTheme.error)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(InspectorTheme.Spacing.md)
+                    .background(RoundedRectangle(cornerRadius: InspectorTheme.Radius.md).fill(InspectorTheme.error.opacity(InspectorTheme.Alpha.subtle)))
+                    .padding(.horizontal, InspectorTheme.Spacing.lg)
+            }
+            InspectorLoadable(isLoading: !isLoaded, isEmpty: filtered.isEmpty) {
+                emptyState
+            } content: {
+                ScrollView {
+                    LazyVStack(spacing: InspectorTheme.Spacing.sm) {
+                        ForEach(Array(filtered.enumerated()), id: \.offset) { _, item in
+                            NavigationLink(destination: KeychainItemScreen(item: item)) {
+                                KeychainRowView(item: item)
+                            }
+                            .buttonStyle(InspectorPressStyle())
                         }
                     }
+                    .padding(.horizontal, InspectorTheme.Spacing.lg)
+                    .padding(.bottom, InspectorTheme.Spacing.lg)
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .overlay {
-            if items.isEmpty {
-                EmptyStateView(
-                    systemImage: "key",
-                    title: search.isEmpty ? "No Keychain items" : "No matches",
-                    message: search.isEmpty
-                        ? "Passwords, keys and certificates the app stores in its Keychain show up here."
-                        : "Nothing matches \"\(search)\" in a key or value."
+        .inspectorScreen()
+        .navigationTitle("Keychain")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                InspectorSearchButton(isActive: $isSearching, text: $search)
+            }
+        }
+    }
+
+    private var summary: some View {
+        HStack(spacing: InspectorTheme.Spacing.sm) {
+            ForEach(KeychainClass.allCases, id: \.self) { type in
+                InspectorSummaryCard(
+                    count: items.filter { $0.storageType == type.rawValue }.count,
+                    label: type.shortTitle,
+                    systemImage: type.systemImage
                 )
             }
         }
     }
 
-    private var kinds: [String] {
-        items.reduce(into: [String]()) { kinds, item in
-            if !kinds.contains(item.kind) { kinds.append(item.kind) }
+    private var chips: some View {
+        InspectorChipRow {
+            InspectorChip(label: "All", isSelected: selectedType == nil) { selectedType = nil }
+            ForEach(KeychainClass.allCases, id: \.self) { type in
+                InspectorChip(label: type.shortTitle, isSelected: selectedType == type, systemImage: type.systemImage) {
+                    selectedType = selectedType == type ? nil : type
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var emptyState: some View {
+        if items.isEmpty {
+            InspectorEmptyState(
+                systemImage: "key",
+                title: "No Keychain items",
+                message: "Passwords, keys and certificates the app stores in its Keychain show up here."
+            )
+        } else {
+            InspectorEmptyState(systemImage: "magnifyingglass", title: "No matches", message: "Try adjusting the search or filters.")
         }
     }
 }
 
+/// The four Keychain item classes `WormaCeptorKeychainItem.storageType` reports.
+enum KeychainClass: String, CaseIterable {
+    case genericPassword = "GENERIC_PASSWORD"
+    case internetPassword = "INTERNET_PASSWORD"
+    case key = "KEY"
+    case certificate = "CERTIFICATE"
+
+    init?(_ item: WormaCeptorKeychainItem) {
+        self.init(rawValue: item.storageType)
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .genericPassword: return "Generic"
+        case .internetPassword: return "Internet"
+        case .key: return "Keys"
+        case .certificate: return "Certs"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .genericPassword: return "lock.shield"
+        case .internetPassword: return "globe"
+        case .key: return "key"
+        case .certificate: return "checkmark.seal"
+        }
+    }
+}
+
+/// Android's `EntryCard`: a green lock tile (Keychain items are always encrypted), key, summary, date, class badge.
 private struct KeychainRowView: View {
     let item: WormaCeptorKeychainItem
 
     var body: some View {
-        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-            Text(item.key)
-                .font(.callout)
-                .lineLimit(2)
-                .truncationMode(.middle)
-            Text(KeychainFormat.summary(item))
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundColor(InspectorTheme.secondaryText)
-                .lineLimit(1)
+        let encrypted = InspectorTheme.color(for: .success)
+        HStack(spacing: InspectorTheme.Spacing.md) {
+            Image(systemName: "lock.fill")
+                .font(.system(size: InspectorTheme.IconSize.md - 2))
+                .foregroundColor(encrypted)
+                .frame(width: InspectorTheme.minTouchTarget, height: InspectorTheme.minTouchTarget)
+                .background(RoundedRectangle(cornerRadius: InspectorTheme.Radius.md).fill(encrypted.opacity(InspectorTheme.Alpha.light)))
+                .accessibilityLabel("Encrypted")
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
+                Text(item.key)
+                    .font(InspectorFont.titleSmall.monospaced())
+                    .foregroundColor(InspectorTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(KeychainFormat.summary(item))
+                    .font(InspectorFont.bodySmall)
+                    .foregroundColor(InspectorTheme.secondaryText)
+                    .lineLimit(1)
+                if let modified = item.modifiedMs?.int64Value {
+                    Text(KeychainFormat.date(modified))
+                        .font(InspectorFont.labelSmall)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            InspectorBadge(
+                text: KeychainClass(item)?.shortTitle ?? item.kind,
+                color: InspectorTheme.secondaryText,
+                font: InspectorFont.labelSmall.weight(.semibold)
+            )
         }
-        .frame(minHeight: InspectorTheme.minTouchTarget)
+        .inspectorCard(fill: InspectorTheme.surface, padding: InspectorTheme.Spacing.lg)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// One item: its value, if it is text, and every attribute.
+/// One item as Android's entry detail: class header, key, value (text values only), every attribute.
 struct KeychainItemScreen: View {
     let item: WormaCeptorKeychainItem
 
     var body: some View {
-        List {
-            if item.valueSize != nil {
-                Section {
-                    if let value = item.value {
-                        Text(value)
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                    } else {
-                        Text(KeychainFormat.summary(item))
-                            .foregroundColor(InspectorTheme.secondaryText)
-                    }
-                } header: {
-                    HStack {
-                        Text("Value")
-                        Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.lg) {
+                InspectorDetailHeader(
+                    systemImage: KeychainClass(item)?.systemImage ?? "key",
+                    color: InspectorTheme.secondaryText,
+                    title: item.kind
+                ) {
+                    Label("Encrypted", systemImage: "lock.fill")
+                        .font(InspectorFont.labelSmall)
+                        .foregroundColor(InspectorTheme.color(for: .success))
+                }
+                InspectorDetailSection("Key") { InspectorDetailValue(text: item.key) }
+                if item.valueSize != nil {
+                    InspectorDetailSection("Value") {
                         if let value = item.value {
                             CopyButton(text: value, label: "Value")
                         }
+                    } content: {
+                        if let value = item.value {
+                            InspectorDetailValue(text: value)
+                        } else {
+                            InspectorDetailValue(text: KeychainFormat.summary(item), color: InspectorTheme.secondaryText)
+                        }
+                    }
+                }
+                InspectorDetailSection("Attributes") {
+                    ForEach(item.details, id: \.label) { row in
+                        InspectorDetailItem(label: row.label, value: row.value)
                     }
                 }
             }
-            Section("Attributes") {
-                ForEach(item.details, id: \.label) { row in
-                    InfoRowView(row: row)
-                }
-            }
+            .padding(InspectorTheme.Spacing.lg)
         }
-        .listStyle(.insetGrouped)
+        .inspectorScreen()
         .navigationTitle(item.key)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -137,14 +249,24 @@ private enum KeychainFormat {
         }
         return "Attributes only"
     }
+
+    static func date(_ epochMillis: Int64) -> String {
+        Date(timeIntervalSince1970: TimeInterval(epochMillis) / 1000).formatted(date: .abbreviated, time: .shortened)
+    }
 }
 
 #if DEBUG
 #Preview("Keychain") {
     NavigationView {
         KeychainContent(items: PreviewSamples.keychain)
-            .navigationTitle("Keychain")
     }
+}
+
+#Preview("Keychain, dark") {
+    NavigationView {
+        KeychainContent(items: PreviewSamples.keychain)
+    }
+    .preferredColorScheme(.dark)
 }
 
 #Preview("Keychain item") {

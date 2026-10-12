@@ -19,7 +19,7 @@ final class CrashDetailModel: ObservableObject {
     }
 }
 
-/// One crash: what, where, when, the message and the stack.
+/// One crash, laid out like Android's crash details: exception card, message card, stack trace card.
 struct CrashDetailScreen: View {
     @StateObject private var model: CrashDetailModel
 
@@ -31,13 +31,14 @@ struct CrashDetailScreen: View {
         if let detail = model.detail {
             CrashDetailContent(detail: detail)
         } else if model.isLoaded {
-            EmptyStateView(
+            InspectorEmptyState(
                 systemImage: "questionmark.circle",
-                title: "Crash gone",
+                title: "Crash not found",
                 message: "It was cleared after this screen opened."
             )
+            .inspectorScreen()
         } else {
-            ProgressView()
+            InspectorSkeletonList(rows: 3, rowHeight: 120).inspectorScreen()
         }
     }
 }
@@ -45,78 +46,42 @@ struct CrashDetailScreen: View {
 struct CrashDetailContent: View {
     let detail: WormaCeptorCrashDetail
 
-    @State private var showsAllFrames = false
-
-    private var appFrameCount: Int {
-        detail.frames.filter(\.isAppCode).count
-    }
-
-    /// With app frames, the others start folded, as on Android; without any, folding would hide everything.
-    private var visibleFrames: [WormaCeptorStackFrame] {
-        showsAllFrames || appFrameCount == 0 ? detail.frames : detail.frames.filter(\.isAppCode)
-    }
-
+    /// Android's shared crash report text.
     private var report: String {
-        var lines = ["Crash: \(detail.exceptionType)", "Time: \(CrashFormat.full(detail.timestampMs))"]
-        if let location = detail.location { lines.append("Location: \(location)") }
-        if let message = detail.message { lines.append("Message: \(message)") }
-        lines.append("")
-        lines.append(detail.stackTrace)
+        var lines = [
+            "WormaCeptor Crash Report",
+            "=======================",
+            "",
+            "Exception: \(detail.exceptionType)",
+            "Time: \(CrashFormat.full(detail.timestampMs))",
+        ]
+        if let message = detail.message, !message.isEmpty {
+            lines += ["", "Message:", message]
+        }
+        lines += ["", "Stack Trace:", detail.stackTrace]
         return lines.joined(separator: "\n")
     }
 
     var body: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
-                    Text(detail.exceptionType)
-                        .font(.system(.headline, design: .monospaced))
-                        .foregroundColor(InspectorTheme.color(for: .error))
-                        .textSelection(.enabled)
-                    if let location = detail.location {
-                        Text("at \(location)")
-                            .font(.system(.footnote, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
-                    Text(CrashFormat.full(detail.timestampMs))
-                        .font(.caption)
-                        .foregroundColor(InspectorTheme.secondaryText)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                CrashExceptionCard(detail: detail)
+                    .padding(.bottom, InspectorTheme.Spacing.xl)
+                if let message = detail.message, !message.isEmpty {
+                    messageCard(message)
+                        .padding(.bottom, InspectorTheme.Spacing.lg)
                 }
-                .padding(.vertical, InspectorTheme.Spacing.xs)
+                CrashStackTraceCard(frames: detail.frames, stackTrace: detail.stackTrace)
             }
-            if let message = detail.message, !message.isEmpty {
-                Section {
-                    Text(message)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-                } header: {
-                    SectionHeader(title: "Message", copyText: message, copyLabel: "Message")
-                }
-            }
-            Section {
-                ForEach(Array(visibleFrames.enumerated()), id: \.offset) { _, frame in
-                    Text(frame.text)
-                        .font(.system(.caption2, design: .monospaced).weight(frame.isAppCode ? .semibold : .regular))
-                        .foregroundColor(frame.isAppCode ? .primary : InspectorTheme.secondaryText)
-                        .textSelection(.enabled)
-                }
-                if appFrameCount > 0, appFrameCount < detail.frames.count {
-                    Button(showsAllFrames ? "Show app frames only" : "Show all \(detail.frames.count) frames") {
-                        showsAllFrames.toggle()
-                    }
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
-                }
-            } header: {
-                SectionHeader(title: "Stack trace", copyText: detail.stackTrace, copyLabel: "Stack trace")
-            }
+            .padding(InspectorTheme.Spacing.lg)
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Crash")
+        .inspectorScreen()
+        .navigationTitle("Crash details")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 if #available(iOS 16.0, *) {
-                    ShareLink(item: report) {
+                    ShareLink(item: report, subject: Text("Crash Report: \(detail.exceptionType)")) {
                         Image(systemName: "square.and.arrow.up")
                             .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
                     }
@@ -127,21 +92,63 @@ struct CrashDetailContent: View {
             }
         }
     }
+
+    private func messageCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.sm) {
+            CrashCardHeader(title: "Exception message", copyText: message, copyLabel: "Message")
+            Text(message)
+                .font(InspectorFont.body)
+                .foregroundColor(InspectorTheme.textPrimary)
+                .textSelection(.enabled)
+        }
+        .inspectorCard(padding: InspectorTheme.Spacing.lg)
+    }
 }
 
-private struct SectionHeader: View {
-    let title: String
-    let copyText: String
-    let copyLabel: String
+/// Android's `ExceptionInfoCard`: a "CRASH" marker, the exception type large in red, when, and where.
+private struct CrashExceptionCard: View {
+    let detail: WormaCeptorCrashDetail
 
     var body: some View {
-        HStack {
-            Text(title)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: InspectorTheme.Spacing.sm) {
+                Circle()
+                    .fill(InspectorTheme.error)
+                    .frame(width: InspectorTheme.Spacing.sm, height: InspectorTheme.Spacing.sm)
+                    .accessibilityHidden(true)
+                Text("CRASH")
+                    .font(InspectorFont.overline)
+                    .foregroundColor(InspectorTheme.error)
+            }
+            .padding(.bottom, InspectorTheme.Spacing.md)
+            Text(detail.exceptionType)
+                .font(InspectorFont.titleLarge.weight(.bold))
+                .foregroundColor(InspectorTheme.error)
+                .textSelection(.enabled)
+                .accessibilityAddTraits(.isHeader)
+                .padding(.bottom, InspectorTheme.Spacing.sm)
+            Text(CrashFormat.full(detail.timestampMs))
+                .font(InspectorFont.body)
                 .foregroundColor(InspectorTheme.secondaryText)
-            Spacer()
-            CopyButton(text: copyText, label: copyLabel)
+            if let location = detail.location {
+                HStack(alignment: .firstTextBaseline, spacing: InspectorTheme.Spacing.xs) {
+                    Text("at")
+                        .font(InspectorFont.bodySmall)
+                        .foregroundColor(InspectorTheme.secondaryText)
+                    Text(location)
+                        .font(InspectorFont.code.weight(.medium))
+                        .foregroundColor(InspectorTheme.brand)
+                        .textSelection(.enabled)
+                }
+                .padding(.top, InspectorTheme.Spacing.xs)
+                .accessibilityElement(children: .combine)
+            }
         }
-        .textCase(nil)
+        .inspectorCard(
+            fill: InspectorTheme.error.opacity(InspectorTheme.Alpha.subtle),
+            border: InspectorTheme.error.opacity(InspectorTheme.Alpha.moderate),
+            padding: InspectorTheme.Spacing.lg
+        )
     }
 }
 
@@ -150,5 +157,12 @@ private struct SectionHeader: View {
     NavigationView {
         CrashDetailContent(detail: PreviewSamples.crashDetail)
     }
+}
+
+#Preview("Crash detail, dark") {
+    NavigationView {
+        CrashDetailContent(detail: PreviewSamples.crashDetail)
+    }
+    .preferredColorScheme(.dark)
 }
 #endif

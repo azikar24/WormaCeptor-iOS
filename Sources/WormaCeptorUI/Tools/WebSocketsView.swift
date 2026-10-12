@@ -45,6 +45,7 @@ struct WebSocketsScreen: View {
     }
 }
 
+/// Android's WebSocket monitor: search, a count bar, then one outlined card per connection.
 struct WebSocketsContent: View {
     let connections: [WormaCeptorWebSocketConnection]
     let onClear: () -> Void
@@ -57,24 +58,36 @@ struct WebSocketsContent: View {
     }
 
     var body: some View {
-        List(filtered, id: \.id) { connection in
-            NavigationLink(destination: WebSocketFramesScreen(connection: connection)) {
-                WebSocketConnectionRow(connection: connection)
-            }
-        }
-        .listStyle(.plain)
-        .searchable(text: $search, prompt: "URL")
-        .overlay {
-            if filtered.isEmpty {
-                EmptyStateView(
-                    systemImage: "arrow.left.arrow.right",
-                    title: connections.isEmpty ? "No WebSocket connections" : "No matches",
+        let visible = filtered
+        VStack(spacing: 0) {
+            InspectorSearchField(placeholder: "Search by URL…", text: $search)
+                .padding(.horizontal, InspectorTheme.Spacing.lg)
+                .padding(.vertical, InspectorTheme.Spacing.sm)
+            WebSocketStatsBar(label: "Connections", total: connections.count, shown: visible.count)
+            if visible.isEmpty {
+                InspectorEmptyState(
+                    systemImage: "arrow.triangle.2.circlepath",
+                    title: connections.isEmpty ? "No WebSocket connections" : "No matching connections",
                     message: connections.isEmpty
                         ? "Connections show up here once WormaCeptorWebSocketCapture.install() runs and the app opens one."
-                        : "No connection URL contains \"\(search)\"."
+                        : "Try a different search query"
                 )
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: InspectorTheme.Spacing.xs) {
+                        ForEach(visible, id: \.id) { connection in
+                            NavigationLink(destination: WebSocketFramesScreen(connection: connection)) {
+                                WebSocketConnectionCard(connection: connection)
+                            }
+                            .buttonStyle(InspectorPressStyle())
+                        }
+                    }
+                    .padding(.horizontal, InspectorTheme.Spacing.sm)
+                    .padding(.vertical, InspectorTheme.Spacing.xs)
+                }
             }
         }
+        .inspectorScreen()
         .navigationTitle("WebSockets")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -84,6 +97,7 @@ struct WebSocketsContent: View {
                 Image(systemName: "trash")
                     .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
             }
+            .tint(InspectorTheme.brand)
             .disabled(connections.isEmpty)
             .accessibilityLabel("Clear connections")
         }
@@ -100,15 +114,6 @@ enum WebSocketFormat {
         state.name.capitalized
     }
 
-    static func color(_ state: WormaCeptorWebSocketState) -> Color {
-        switch state {
-        case .open: return InspectorTheme.color(for: .success)
-        case .connecting: return InspectorTheme.color(for: .redirect)
-        case .closing: return InspectorTheme.color(for: .warning)
-        default: return InspectorTheme.color(for: .neutral)
-        }
-    }
-
     static func closeSummary(_ connection: WormaCeptorWebSocketConnection) -> String? {
         let parts = [connection.closeCode.map { "Code \($0.int32Value)" }, connection.closeReason].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
@@ -122,6 +127,11 @@ enum WebSocketFormat {
         direction == .sent ? "Sent" : "Received"
     }
 
+    /// Android's short direction label in the message header.
+    static func directionTag(_ direction: WormaCeptorWebSocketDirection) -> String {
+        direction == .sent ? "SENT" : "RECV"
+    }
+
     static func type(_ type: WormaCeptorWebSocketFrameType) -> String {
         type.name.capitalized
     }
@@ -129,168 +139,82 @@ enum WebSocketFormat {
     static func size(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
     }
+
+    /// `HH:mm:ss`, as Android prints the connection's open time.
+    static func clock(_ epochMillis: KotlinLong?) -> String {
+        guard let millis = epochMillis?.int64Value else { return "--:--:--" }
+        return clockFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(millis) / 1000))
+    }
+
+    private static let clockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }
 
-private struct WebSocketConnectionRow: View {
-    let connection: WormaCeptorWebSocketConnection
+/// Android's `StatsBar`: a label on the left, "N total" or "shown / total" on the right.
+struct WebSocketStatsBar: View {
+    let label: String
+    let total: Int
+    let shown: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-            HStack(spacing: InspectorTheme.Spacing.sm) {
-                InspectorBadge(text: WebSocketFormat.state(connection.state), color: WebSocketFormat.color(connection.state))
-                Text("\(connection.frameCount) frames")
-                    .font(.caption)
-                    .foregroundColor(InspectorTheme.secondaryText)
-                Spacer(minLength: InspectorTheme.Spacing.sm)
-                if let duration = InspectorFormat.duration(connection.durationMs) {
-                    Text(duration)
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(InspectorTheme.secondaryText)
-                }
-            }
-            Text(connection.url)
-                .font(.system(.footnote, design: .monospaced))
-                .lineLimit(2)
-                .truncationMode(.middle)
+        HStack {
+            Text(label)
+            Spacer()
+            Text(shown == total ? "\(total) total" : "\(shown) / \(total)")
+                .monospacedDigit()
         }
-        .padding(.vertical, InspectorTheme.Spacing.xxs)
-        .frame(minHeight: InspectorTheme.minTouchTarget)
+        .font(InspectorFont.labelSmall)
+        .foregroundColor(InspectorTheme.secondaryText)
+        .padding(.horizontal, InspectorTheme.Spacing.lg)
+        .padding(.vertical, InspectorTheme.Spacing.xs)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// One connection's frames, chat order, with its state on top.
-struct WebSocketFramesScreen: View {
+private struct WebSocketConnectionCard: View {
     let connection: WormaCeptorWebSocketConnection
-    @StateObject private var model: WebSocketFramesModel
-
-    init(connection: WormaCeptorWebSocketConnection) {
-        self.connection = connection
-        _model = StateObject(wrappedValue: WebSocketFramesModel(connectionId: connection.id))
-    }
 
     var body: some View {
-        WebSocketFramesContent(connection: connection, frames: model.frames)
-    }
-}
-
-struct WebSocketFramesContent: View {
-    let connection: WormaCeptorWebSocketConnection
-    let frames: [WormaCeptorWebSocketFrame]
-
-    @State private var search = ""
-
-    private var filtered: [WormaCeptorWebSocketFrame] {
-        search.isEmpty ? frames : frames.filter { $0.payload.localizedCaseInsensitiveContains(search) }
-    }
-
-    var body: some View {
-        List {
-            Section {
-                InfoRowView(row: WormaCeptorInfoRow(label: "URL", value: connection.url))
-                InfoRowView(row: WormaCeptorInfoRow(label: "State", value: WebSocketFormat.state(connection.state)))
-                if let close = WebSocketFormat.closeSummary(connection) {
-                    InfoRowView(row: WormaCeptorInfoRow(label: "Close", value: close))
-                }
+        let color = MiscToolColors.WebSocket.color(connection.state)
+        let duration = InspectorFormat.duration(connection.durationMs) ?? "--"
+        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
+            HStack(spacing: InspectorTheme.Spacing.sm) {
+                InspectorStatusDot(color: color)
+                Text(connection.url)
+                    .font(InspectorFont.bodyMedium)
+                    .foregroundColor(InspectorTheme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(WebSocketFormat.clock(connection.openedAtMs))
+                    .font(InspectorFont.code)
+                    .foregroundColor(InspectorTheme.secondaryText)
             }
-            Section("Frames") {
-                ForEach(filtered, id: \.id) { frame in
-                    NavigationLink(destination: WebSocketFrameScreen(frame: frame)) {
-                        WebSocketFrameRow(frame: frame)
-                    }
-                }
+            HStack(spacing: InspectorTheme.Spacing.md) {
+                InspectorBadge(text: connection.state.name, color: color)
+                Text("\(connection.frameCount) msgs")
+                    .font(InspectorFont.labelSmall.monospacedDigit())
+                    .foregroundColor(InspectorTheme.secondaryText)
+                Text(duration)
+                    .font(InspectorFont.code)
+                    .foregroundColor(InspectorTheme.secondaryText)
             }
         }
-        .listStyle(.insetGrouped)
-        .searchable(text: $search, prompt: "Payload")
-        .overlay {
-            if filtered.isEmpty {
-                EmptyStateView(
-                    systemImage: "text.bubble",
-                    title: frames.isEmpty ? "No frames" : "No matches",
-                    message: frames.isEmpty ? "Frames show up as the app sends and receives them." : "No payload contains \"\(search)\"."
-                )
-            }
-        }
-        .navigationTitle("Frames")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private struct WebSocketFrameRow: View {
-    let frame: WormaCeptorWebSocketFrame
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: InspectorTheme.Spacing.sm) {
-            Image(systemName: WebSocketFormat.arrow(frame.direction))
-                .foregroundColor(InspectorTheme.color(for: frame.direction == .sent ? .redirect : .success))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-                HStack(spacing: InspectorTheme.Spacing.sm) {
-                    Text(WebSocketFormat.type(frame.type))
-                        .font(.caption.weight(.semibold))
-                    Text(WebSocketFormat.size(frame.size))
-                        .font(.caption)
-                        .foregroundColor(InspectorTheme.secondaryText)
-                    Spacer(minLength: InspectorTheme.Spacing.sm)
-                    Text(LogsFormat.time(frame.timestampMs))
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(InspectorTheme.secondaryText)
-                }
-                if !frame.payload.isEmpty {
-                    Text(frame.payload)
-                        .font(.system(.caption, design: .monospaced))
-                        .lineLimit(3)
-                }
-            }
-        }
-        .padding(.vertical, InspectorTheme.Spacing.xxs)
-        .frame(minHeight: InspectorTheme.minTouchTarget)
+        .padding(.horizontal, InspectorTheme.Spacing.md)
+        .padding(.vertical, InspectorTheme.Spacing.sm)
+        .inspectorCard(
+            fill: InspectorTheme.surface,
+            border: InspectorTheme.outlineVariant.opacity(InspectorTheme.Alpha.medium),
+            padding: 0
+        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            "\(WebSocketFormat.directionTitle(frame.direction)) \(WebSocketFormat.type(frame.type)), "
-                + "\(WebSocketFormat.size(frame.size)), \(frame.payload.prefix(200))"
+            "\(WebSocketFormat.state(connection.state)), \(connection.url), \(connection.frameCount) messages, \(duration)"
         )
-    }
-}
-
-/// One frame: its metadata and its payload, JSON pretty printed.
-struct WebSocketFrameScreen: View {
-    let frame: WormaCeptorWebSocketFrame
-
-    private var payload: String {
-        WormaCeptorWebSockets.shared.prettyJson(payload: frame.payload) ?? frame.payload
-    }
-
-    var body: some View {
-        List {
-            Section {
-                InfoRowView(row: WormaCeptorInfoRow(label: "Direction", value: WebSocketFormat.directionTitle(frame.direction)))
-                InfoRowView(row: WormaCeptorInfoRow(label: "Type", value: WebSocketFormat.type(frame.type)))
-                InfoRowView(row: WormaCeptorInfoRow(label: "Size", value: WebSocketFormat.size(frame.size)))
-                InfoRowView(row: WormaCeptorInfoRow(label: "Time", value: LogsFormat.time(frame.timestampMs)))
-            }
-            Section {
-                if frame.payload.isEmpty {
-                    Text("No payload").foregroundColor(InspectorTheme.secondaryText)
-                } else {
-                    Text(payload)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-            } header: {
-                HStack {
-                    Text(frame.type == .binary ? "Payload (hex)" : "Payload")
-                    Spacer()
-                    if !frame.payload.isEmpty {
-                        CopyButton(text: payload, label: "Payload")
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Frame")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -301,15 +225,16 @@ struct WebSocketFrameScreen: View {
     }
 }
 
-#Preview("Frames") {
+#Preview("WebSockets dark") {
     NavigationView {
-        WebSocketFramesContent(connection: PreviewSamples.webSocketConnections[0], frames: PreviewSamples.webSocketFrames)
+        WebSocketsContent(connections: PreviewSamples.webSocketConnections, onClear: {})
     }
+    .preferredColorScheme(.dark)
 }
 
-#Preview("Frame") {
+#Preview("WebSockets empty") {
     NavigationView {
-        WebSocketFrameScreen(frame: PreviewSamples.webSocketFrames[0])
+        WebSocketsContent(connections: [], onClear: {})
     }
 }
 #endif

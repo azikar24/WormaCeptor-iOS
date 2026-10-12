@@ -27,63 +27,222 @@ struct RateLimitScreen: View {
             if let state = model.state {
                 RateLimitContent(state: state, presets: WormaCeptorRateLimit.shared.presets)
             } else {
-                ProgressView()
+                InspectorSkeletonList(rows: 4, rowHeight: 96)
             }
         }
+        .inspectorScreen()
         .navigationTitle("Network throttling")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
+            ToolbarItemGroup(placement: .primaryAction) {
+                toolbarButton("arrow.counterclockwise", label: "Reset to defaults") {
                     WormaCeptorRateLimit.shared.resetToDefaults()
-                } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
                 }
-                .accessibilityLabel("Reset to defaults")
+                toolbarButton("trash", label: "Clear statistics") {
+                    WormaCeptorRateLimit.shared.clearStats()
+                }
             }
         }
     }
+
+    private func toolbarButton(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(minWidth: InspectorTheme.minTouchTarget, minHeight: InspectorTheme.minTouchTarget)
+        }
+        .tint(InspectorTheme.brand)
+        .accessibilityLabel(label)
+    }
 }
 
+/// Android's layout: the enable card, then statistics, presets and custom configuration while throttling is on.
 struct RateLimitContent: View {
     let state: WormaCeptorRateLimitState
     let presets: [WormaCeptorRateLimitPreset]
     var limiter: WormaCeptorRateLimit = .shared
 
     var body: some View {
-        List {
-            Section {
-                Toggle(isOn: Binding(get: { state.enabled }, set: { limiter.setEnabled(enabled: $0) })) {
-                    VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-                        Text("Throttle requests")
-                        Text(state.enabled ? "Active, throttling the network" : "Off")
-                            .font(.footnote)
-                            .foregroundColor(InspectorTheme.secondaryText)
+        ScrollView {
+            VStack(spacing: InspectorTheme.Spacing.lg) {
+                InspectorToggleCard(
+                    title: "Rate limiting",
+                    status: state.enabled ? "Active, throttling the network" : "Disabled",
+                    systemImage: "speedometer",
+                    isOn: state.enabled,
+                    onToggle: { limiter.setEnabled(enabled: $0) }
+                )
+                if state.enabled {
+                    VStack(spacing: InspectorTheme.Spacing.lg) {
+                        RateLimitStatisticsCard(state: state)
+                        RateLimitPresetsCard(state: state, presets: presets, limiter: limiter)
+                        RateLimitConfigurationCard(state: state, limiter: limiter)
                     }
+                    .transition(InspectorMotion.expand)
                 }
-                .frame(minHeight: InspectorTheme.minTouchTarget)
-            } footer: {
                 Text("Applies to URLSession with WormaCeptorURLSession installed and to Ktor clients with the "
-                    + "WormaCeptor plugin. Mocked responses are not throttled.")
+                    + "WormaCeptor plugin. Mocked responses are not throttled. Changing a value replaces the preset; "
+                    + "speeds are per request.")
+                    .font(InspectorFont.bodySmall)
+                    .foregroundColor(InspectorTheme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .padding(InspectorTheme.Spacing.lg)
+        }
+        .inspectorAnimation(InspectorMotion.standard(InspectorMotion.page), value: state.enabled)
+    }
+}
 
-            Section("Presets") {
+/// Android's `RateLimitCard`: an outlined card with a title row.
+private struct RateLimitCard<Content: View, Trailing: View>: View {
+    let title: String
+    @ViewBuilder var trailing: () -> Trailing
+    @ViewBuilder var content: () -> Content
+
+    init(_ title: String, @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.trailing = trailing
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: InspectorTheme.Spacing.md) {
+            HStack {
+                Text(title)
+                    .font(InspectorFont.titleMedium)
+                    .foregroundColor(InspectorTheme.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                trailing()
+            }
+            content()
+        }
+        .inspectorCard(
+            fill: InspectorTheme.surface,
+            border: InspectorTheme.outlineVariant.opacity(InspectorTheme.Alpha.medium),
+            padding: InspectorTheme.Spacing.lg
+        )
+    }
+}
+
+private struct RateLimitStatisticsCard: View {
+    let state: WormaCeptorRateLimitState
+
+    var body: some View {
+        RateLimitCard("Statistics") {
+            Image(systemName: "network")
+                .foregroundColor(InspectorTheme.secondaryText)
+                .accessibilityHidden(true)
+        } content: {
+            HStack {
+                stat("Requests throttled", "\(state.requestsThrottled)")
+                stat(
+                    "Packets dropped",
+                    "\(state.packetsDropped)",
+                    color: state.packetsDropped > 0 ? InspectorTheme.error : InspectorTheme.textPrimary
+                )
+            }
+            HStack {
+                stat("Total delay", InspectorFormat.duration(KotlinLong(longLong: state.totalDelayMs)) ?? "0 ms")
+                stat("Bytes throttled", state.bytesThrottledText)
+            }
+        }
+    }
+
+    private func stat(_ label: String, _ value: String, color: Color = InspectorTheme.textPrimary) -> some View {
+        VStack(spacing: InspectorTheme.Spacing.xxs) {
+            Text(value)
+                .font(InspectorFont.headline.weight(.bold).monospaced())
+                .foregroundColor(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label)
+                .font(InspectorFont.labelSmall)
+                .foregroundColor(InspectorTheme.secondaryText)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(InspectorTheme.Spacing.sm)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), \(value)")
+    }
+}
+
+private struct RateLimitPresetsCard: View {
+    let state: WormaCeptorRateLimitState
+    let presets: [WormaCeptorRateLimitPreset]
+    let limiter: WormaCeptorRateLimit
+
+    var body: some View {
+        RateLimitCard("Network presets") {
+            InspectorChipRow(inset: 0) {
                 ForEach(presets, id: \.id) { preset in
-                    PresetRow(preset: preset, isSelected: state.presetId == preset.id) {
+                    InspectorChip(
+                        label: preset.title,
+                        isSelected: state.presetId == preset.id,
+                        systemImage: Self.icon(preset.id)
+                    ) {
                         limiter.applyPreset(id: preset.id)
                     }
                 }
             }
+            if let selected = presets.first(where: { $0.id == state.presetId }) {
+                HStack {
+                    info("icloud.and.arrow.down", "Down", selected.downloadText)
+                    info("icloud.and.arrow.up", "Up", selected.uploadText)
+                    info("timer", "Latency", "\(selected.latencyMs)ms")
+                    info("exclamationmark.triangle", "Loss", "\(Int(selected.packetLossPercent))%")
+                }
+                .padding(InspectorTheme.Spacing.md)
+                .background(RoundedRectangle(cornerRadius: InspectorTheme.Radius.md).fill(InspectorTheme.surfaceHigh))
+                .transition(.opacity)
+            }
+        }
+        .inspectorAnimation(InspectorMotion.standard(InspectorMotion.normal), value: state.presetId)
+    }
 
-            Section {
-                SpeedSlider(title: "Download speed", kbps: state.downloadSpeedKbps, text: state.downloadText) {
+    private func info(_ systemImage: String, _ label: String, _ value: String) -> some View {
+        VStack(spacing: InspectorTheme.Spacing.xxs) {
+            Image(systemName: systemImage)
+                .font(.system(size: InspectorTheme.IconSize.sm - 2))
+                .foregroundColor(InspectorTheme.secondaryText)
+            Text(label)
+                .font(InspectorFont.labelSmall)
+                .foregroundColor(InspectorTheme.secondaryText)
+            Text(value)
+                .font(InspectorFont.code.weight(.semibold))
+                .foregroundColor(InspectorTheme.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) \(value)")
+    }
+
+    /// Android's preset icons: Wi-Fi, cellular bars, or no signal.
+    static func icon(_ id: String) -> String {
+        switch id {
+        case "WIFI": return "wifi"
+        case "OFFLINE": return "antenna.radiowaves.left.and.right.slash"
+        default: return "cellularbars"
+        }
+    }
+}
+
+private struct RateLimitConfigurationCard: View {
+    let state: WormaCeptorRateLimitState
+    let limiter: WormaCeptorRateLimit
+
+    var body: some View {
+        RateLimitCard("Custom configuration") {
+            VStack(spacing: InspectorTheme.Spacing.lg) {
+                SpeedSlider(icon: "icloud.and.arrow.down", title: "Download speed", kbps: state.downloadSpeedKbps, text: state.downloadText) {
                     limiter.setDownloadSpeed(kbps: $0)
                 }
-                SpeedSlider(title: "Upload speed", kbps: state.uploadSpeedKbps, text: state.uploadText) {
+                SpeedSlider(icon: "icloud.and.arrow.up", title: "Upload speed", kbps: state.uploadSpeedKbps, text: state.uploadText) {
                     limiter.setUploadSpeed(kbps: $0)
                 }
                 ValueSlider(
+                    icon: "timer",
                     title: "Latency",
                     value: Double(state.latencyMs),
                     range: 0...Double(WormaCeptorRateLimit.shared.MAX_LATENCY_MS),
@@ -92,6 +251,7 @@ struct RateLimitContent: View {
                     onCommit: { limiter.setLatency(ms: Int64($0)) }
                 )
                 ValueSlider(
+                    icon: "exclamationmark.triangle",
                     title: "Packet loss",
                     value: Double(state.packetLossPercent),
                     range: 0...100,
@@ -99,75 +259,14 @@ struct RateLimitContent: View {
                     format: { "\(Int($0))%" },
                     onCommit: { limiter.setPacketLoss(percent: Float($0)) }
                 )
-            } header: {
-                Text("Custom")
-            } footer: {
-                Text("Changing a value replaces the preset. Speeds are per request.")
-            }
-            .disabled(!state.enabled)
-
-            Section {
-                StatRow(label: "Requests throttled", value: "\(state.requestsThrottled)")
-                StatRow(
-                    label: "Packets dropped",
-                    value: "\(state.packetsDropped)",
-                    color: state.packetsDropped > 0 ? InspectorTheme.color(for: .error) : nil
-                )
-                StatRow(label: "Total delay", value: Self.delay(state.totalDelayMs))
-                StatRow(label: "Bytes throttled", value: state.bytesThrottledText)
-                Button("Clear statistics") { limiter.clearStats() }
-                    .frame(minHeight: InspectorTheme.minTouchTarget)
-            } header: {
-                Text("Statistics")
             }
         }
-        .listStyle(.insetGrouped)
-    }
-
-    private static func delay(_ milliseconds: Int64) -> String {
-        InspectorFormat.duration(KotlinLong(longLong: milliseconds)) ?? "0 ms"
-    }
-}
-
-private struct PresetRow: View {
-    let preset: WormaCeptorRateLimitPreset
-    let isSelected: Bool
-    let onSelect: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack {
-                VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xxs) {
-                    Text(preset.title)
-                        .foregroundColor(.primary)
-                    Text(summary)
-                        .font(.footnote.monospacedDigit())
-                        .foregroundColor(InspectorTheme.secondaryText)
-                }
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .foregroundColor(.accentColor)
-                        .accessibilityHidden(true)
-                }
-            }
-            .frame(minHeight: InspectorTheme.minTouchTarget)
-            .contentShape(Rectangle())
-        }
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
-    private var summary: String {
-        if preset.downloadKbps == 0 && preset.uploadKbps == 0 {
-            return "Every request fails"
-        }
-        return "Down \(preset.downloadText), up \(preset.uploadText), \(preset.latencyMs) ms, "
-            + "\(Int(preset.packetLossPercent))% loss"
     }
 }
 
 /// A speed from 1 Kbps to 100 Mbps on a log scale, so slow networks get as much of the track as fast ones.
 private struct SpeedSlider: View {
+    let icon: String
     let title: String
     let kbps: Int64
     let text: String
@@ -175,6 +274,7 @@ private struct SpeedSlider: View {
 
     var body: some View {
         ValueSlider(
+            icon: icon,
             title: title,
             value: log10(Double(max(kbps, 1))),
             range: 0...log10(Double(WormaCeptorRateLimit.shared.MAX_SPEED_KBPS)),
@@ -195,8 +295,10 @@ private struct SpeedSlider: View {
     }
 }
 
-/// A labelled slider that commits when the finger lifts, so a drag isn't a stream of config changes.
+/// Android's `ConfigSlider`: icon, label and mono value over a brand slider. Commits when the finger lifts, so a
+/// drag isn't a stream of config changes.
 private struct ValueSlider: View {
+    let icon: String
     let title: String
     let value: Double
     let range: ClosedRange<Double>
@@ -208,13 +310,21 @@ private struct ValueSlider: View {
     @State private var draft: Double?
 
     var body: some View {
+        let shown = draft.map(format) ?? initialText ?? format(value)
         VStack(alignment: .leading, spacing: InspectorTheme.Spacing.xs) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(draft.map(format) ?? initialText ?? format(value))
-                    .font(.callout.monospacedDigit())
+            HStack(spacing: InspectorTheme.Spacing.sm) {
+                Image(systemName: icon)
+                    .font(.system(size: InspectorTheme.IconSize.sm))
                     .foregroundColor(InspectorTheme.secondaryText)
+                    .frame(width: InspectorTheme.IconSize.md)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(InspectorFont.body)
+                    .foregroundColor(InspectorTheme.textPrimary)
+                Spacer()
+                Text(shown)
+                    .font(InspectorFont.body.weight(.semibold).monospaced())
+                    .foregroundColor(InspectorTheme.textPrimary)
             }
             Slider(
                 value: Binding(get: { draft ?? value }, set: { draft = $0 }),
@@ -226,30 +336,11 @@ private struct ValueSlider: View {
                     self.draft = nil
                 }
             }
+            .tint(InspectorTheme.brand)
             .accessibilityLabel(title)
-            .accessibilityValue(draft.map(format) ?? initialText ?? format(value))
-        }
-        .padding(.vertical, InspectorTheme.Spacing.xs)
-        .frame(minHeight: InspectorTheme.minTouchTarget)
-    }
-}
-
-private struct StatRow: View {
-    let label: String
-    let value: String
-    var color: Color?
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .foregroundColor(InspectorTheme.secondaryText)
-            Spacer()
-            Text(value)
-                .font(.body.monospacedDigit())
-                .foregroundColor(color ?? .primary)
+            .accessibilityValue(shown)
         }
         .frame(minHeight: InspectorTheme.minTouchTarget)
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -257,7 +348,17 @@ private struct StatRow: View {
 #Preview("Throttling on") {
     NavigationView {
         RateLimitContent(state: PreviewSamples.rateLimit, presets: PreviewSamples.rateLimitPresets)
+            .inspectorScreen()
             .navigationTitle("Network throttling")
     }
+}
+
+#Preview("Throttling on, dark") {
+    NavigationView {
+        RateLimitContent(state: PreviewSamples.rateLimit, presets: PreviewSamples.rateLimitPresets)
+            .inspectorScreen()
+            .navigationTitle("Network throttling")
+    }
+    .preferredColorScheme(.dark)
 }
 #endif
